@@ -1,18 +1,24 @@
 from flask import Flask, Response, jsonify
 import cv2
 import numpy as np
-from ultralytics import YOLO
 import time
 import threading
+from yolo3d_detector import YOLODetector, draw_detection_with_depth
 
 app = Flask(__name__)
 
 # ==============================
-# LOAD MODEL (YOUR FILE)
+# INITIALIZE YOLO-D DETECTOR
 # ==============================
-MODEL_PATH = "yolo11n.pt"
-model = YOLO(MODEL_PATH)
-labels = model.names
+print("Initializing YOLO-D detector...")
+detector = YOLODetector(
+    yolo_model_path="yolo11n.pt",
+    depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
+    depth_input_size=(384, 384),  # Smaller = faster on Pi
+    depth_throttle=3,  # Process depth every 3 frames
+    conf_threshold=0.5
+)
+print("✓ YOLO-D detector ready")
 
 # ==============================
 # CAMERA (USB CAM OR PI CAM)
@@ -37,6 +43,10 @@ bbox_colors = [
 ]
 
 def generate_frames():
+    """
+    Generate video frames with YOLO-D (depth-aware) detection.
+    Optimized for Raspberry Pi CPU.
+    """
     fps_buffer = []
     fps_avg_len = 30
     last_time = time.time()
@@ -47,33 +57,25 @@ def generate_frames():
         if not success:
             break
 
-        # YOLO inference
-        results = model(frame, verbose=False)
-        detections = results[0].boxes
+        # Run YOLO-D detection (includes depth estimation)
+        detections, depth_map = detector.detect(frame, update_depth=True)
 
         object_count = 0
         current_detections = []
 
-        for det in detections:
-            conf = det.conf.item()
-            if conf < 0.5:
-                continue
-
-            x1, y1, x2, y2 = map(int, det.xyxy.cpu().numpy().squeeze())
-            cls_id = int(det.cls.item())
-            label = labels[cls_id]
-
+        # Draw detections with depth information
+        for detection in detections:
+            cls_id = detection['class_id']
             color = bbox_colors[cls_id % len(bbox_colors)]
-            cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
-
-            text = f"{label} {int(conf*100)}%"
-            cv2.putText(frame, text, (x1, y1-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
+            
+            # Draw detection with depth overlay
+            draw_detection_with_depth(frame, detection, color)
+            
             object_count += 1
             current_detections.append({
-                'label': label,
-                'confidence': int(conf*100)
+                'label': detection['class'],
+                'confidence': int(detection['confidence'] * 100),
+                'depth': round(detection['depth'], 2)
             })
 
         # Calculate FPS
@@ -101,6 +103,12 @@ def generate_frames():
         cv2.putText(frame, f"FPS: {avg_fps:.1f}",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, (0, 255, 255), 2)
+        
+        # Optional: Draw depth map indicator
+        if depth_map is not None:
+            cv2.putText(frame, "Depth: ON",
+                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.6, (0, 255, 0), 2)
 
         # Encode frame as JPEG with lower quality for better performance
         ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -117,7 +125,7 @@ def index():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>YOLO Live Detection - Raspberry Pi</title>
+        <title>YOLO-D Live Detection - Raspberry Pi</title>
         <style>
             * {
                 margin: 0;
@@ -322,8 +330,8 @@ def index():
     <body>
         <div class="container">
             <div class="header">
-                <h1>🎯 YOLO Live Detection</h1>
-                <p><span class="status-indicator"></span>Real-time Object Detection System</p>
+                <h1>🎯 YOLO-D Live Detection</h1>
+                <p><span class="status-indicator"></span>Real-time Depth-Aware Object Detection</p>
             </div>
             
             <div class="main-content">
@@ -354,7 +362,7 @@ def index():
             </div>
             
             <div class="footer">
-                <p>Powered by YOLO11n on Raspberry Pi | Real-time Object Detection</p>
+                <p>Powered by YOLO-D (YOLO11n + Depth) on Raspberry Pi | Real-time Depth-Aware Detection</p>
             </div>
         </div>
         
@@ -371,8 +379,15 @@ def index():
                         if (data.detections && data.detections.length > 0) {
                             detectionsList.innerHTML = data.detections.map(det => 
                                 `<div class="detection-item">
-                                    <span class="detection-label">${det.label}</span>
-                                    <span class="detection-confidence">${det.confidence}%</span>
+                                    <div style="display: flex; flex-direction: column; gap: 5px;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                                            <span class="detection-label">${det.label}</span>
+                                            <span class="detection-confidence">${det.confidence}%</span>
+                                        </div>
+                                        <div style="font-size: 0.85em; color: #667eea; font-weight: 600;">
+                                            📏 Distance: ${det.depth}m
+                                        </div>
+                                    </div>
                                 </div>`
                             ).join('');
                         } else {
