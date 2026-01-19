@@ -117,7 +117,7 @@ def create_3d_bbox_from_2d(bbox_2d, depth, camera_matrix,
 
 def draw_3d_bbox(frame, corners_3d, camera_matrix, color=(0, 255, 0), thickness=2):
     """
-    Draw 3D bounding box on 2D image.
+    Draw 3D bounding box on 2D image with enhanced 3D visualization.
     
     Args:
         frame: Image to draw on
@@ -133,28 +133,111 @@ def draw_3d_bbox(frame, corners_3d, camera_matrix, color=(0, 255, 0), thickness=
     corners_2d = project_3d_to_2d(corners_3d, camera_matrix)
     corners_2d = corners_2d.astype(int)
     
-    # Define edges of the 3D box (12 edges of a cube)
-    edges = [
-        # Front face
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        # Back face
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        # Connecting edges
-        (0, 4), (1, 5), (2, 6), (3, 7)
-    ]
+    h, w = frame.shape[:2]
     
-    # Draw edges
-    for edge in edges:
+    # Define edges of the 3D box (12 edges of a cube)
+    # Front face (closer to camera) - draw with full color and thickness
+    front_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    # Back face (farther from camera) - draw with lighter/dashed style
+    back_edges = [(4, 5), (5, 6), (6, 7), (7, 4)]
+    # Connecting edges (depth edges)
+    connecting_edges = [(0, 4), (1, 5), (2, 6), (3, 7)]
+    
+    # Draw front face (thicker, brighter)
+    for edge in front_edges:
         pt1 = tuple(corners_2d[edge[0]])
         pt2 = tuple(corners_2d[edge[1]])
-        
-        # Only draw if both points are within frame bounds
-        h, w = frame.shape[:2]
         if (0 <= pt1[0] < w and 0 <= pt1[1] < h and
             0 <= pt2[0] < w and 0 <= pt2[1] < h):
-            cv2.line(frame, pt1, pt2, color, thickness)
+            cv2.line(frame, pt1, pt2, color, thickness + 1)
+    
+    # Draw back face (thinner, slightly darker to show depth)
+    back_color = tuple(int(c * 0.6) for c in color)  # Darker version
+    for edge in back_edges:
+        pt1 = tuple(corners_2d[edge[0]])
+        pt2 = tuple(corners_2d[edge[1]])
+        if (0 <= pt1[0] < w and 0 <= pt1[1] < h and
+            0 <= pt2[0] < w and 0 <= pt2[1] < h):
+            cv2.line(frame, pt1, pt2, back_color, max(1, thickness - 1))
+    
+    # Draw connecting edges (depth lines)
+    for edge in connecting_edges:
+        pt1 = tuple(corners_2d[edge[0]])
+        pt2 = tuple(corners_2d[edge[1]])
+        if (0 <= pt1[0] < w and 0 <= pt1[1] < h and
+            0 <= pt2[0] < w and 0 <= pt2[1] < h):
+            # Draw dashed line for depth edges
+            draw_dashed_line(frame, pt1, pt2, color, thickness)
     
     return frame
+
+
+def draw_dashed_line(img, pt1, pt2, color, thickness=1, dash_length=10):
+    """
+    Draw a dashed line between two points.
+    """
+    dist = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+    if dist < dash_length:
+        cv2.line(img, pt1, pt2, color, thickness)
+        return
+    
+    num_dashes = int(dist / dash_length)
+    dx = (pt2[0] - pt1[0]) / num_dashes
+    dy = (pt2[1] - pt1[1]) / num_dashes
+    
+    for i in range(0, num_dashes, 2):
+        start = (int(pt1[0] + i * dx), int(pt1[1] + i * dy))
+        end = (int(pt1[0] + (i + 1) * dx), int(pt1[1] + (i + 1) * dy))
+        cv2.line(img, start, end, color, thickness)
+
+
+def draw_depth_overlay(frame, bbox_2d, depth_map, alpha=0.3):
+    """
+    Draw semi-transparent depth overlay inside bounding box.
+    Blue color indicates depth information.
+    
+    Args:
+        frame: Image to draw on
+        bbox_2d: 2D bounding box (x1, y1, x2, y2)
+        depth_map: Depth map (numpy array)
+        alpha: Transparency (0.0 to 1.0)
+    
+    Returns:
+        frame: Image with depth overlay
+    """
+    if depth_map is None:
+        return frame
+    
+    x1, y1, x2, y2 = bbox_2d
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(frame.shape[1], x2), min(frame.shape[0], y2)
+    
+    # Extract depth region
+    depth_region = depth_map[y1:y2, x1:x2]
+    if depth_region.size == 0:
+        return frame
+    
+    # Normalize depth to 0-255 for visualization
+    depth_norm = cv2.normalize(depth_region, None, 0, 255, cv2.NORM_MINMAX)
+    depth_norm = depth_norm.astype(np.uint8)
+    
+    # Create blue overlay (BGR format: blue channel)
+    overlay = frame.copy()
+    overlay_region = overlay[y1:y2, x1:x2]
+    
+    # Create blue tint based on depth
+    # Closer objects = brighter blue, farther = darker blue
+    blue_channel = depth_norm
+    green_channel = (depth_norm * 0.3).astype(np.uint8)  # Slight green tint
+    red_channel = np.zeros_like(depth_norm)
+    
+    # Combine channels
+    blue_overlay = np.stack([blue_channel, green_channel, red_channel], axis=2)
+    
+    # Blend with original image
+    overlay_region[:] = cv2.addWeighted(overlay_region, 1 - alpha, blue_overlay, alpha, 0)
+    overlay[y1:y2, x1:x2] = overlay_region
+    
+    return overlay
 
 
 def create_bird_eye_view(detections, camera_matrix, bev_size=(400, 400), 

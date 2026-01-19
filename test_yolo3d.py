@@ -16,7 +16,8 @@ from bbox3d_utils import (
     create_3d_bbox_from_2d,
     draw_3d_bbox,
     create_bird_eye_view,
-    visualize_depth_map
+    visualize_depth_map,
+    draw_depth_overlay
 )
 
 # Initialize detector
@@ -101,7 +102,11 @@ while True:
                 bbox, depth, camera_matrix, obj_dims
             )
             
-            # Draw 3D bounding box
+            # Draw depth overlay first (so 3D box appears on top)
+            if depth_map is not None:
+                vis_frame = draw_depth_overlay(vis_frame, bbox, depth_map, alpha=0.3)
+            
+            # Draw 3D bounding box (wireframe)
             color = bbox_colors[cls_id % len(bbox_colors)]
             vis_frame = draw_3d_bbox(vis_frame, corners_3d, camera_matrix, color, 2)
             
