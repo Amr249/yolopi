@@ -115,19 +115,20 @@ def create_3d_bbox_from_2d(bbox_2d, depth, camera_matrix,
     return corners_3d, center_3d
 
 
-def draw_3d_bbox(frame, corners_3d, camera_matrix, color=(0, 255, 0), thickness=2):
+def draw_3d_bbox(frame, corners_3d, camera_matrix, color=(255, 255, 255), thickness=2):
     """
-    Draw 3D bounding box on 2D image with enhanced 3D visualization.
+    Draw 3D bounding box (cube) on 2D image with prominent wireframe visualization.
+    Objects are clearly enclosed within the 3D cube structure.
     
     Args:
         frame: Image to draw on
         corners_3d: 8x3 array of 3D box corners
         camera_matrix: 3x3 camera intrinsic matrix
-        color: BGR color tuple
+        color: BGR color tuple (default white)
         thickness: Line thickness
     
     Returns:
-        frame: Image with 3D box drawn
+        frame: Image with 3D cube drawn
     """
     # Project 3D corners to 2D
     corners_2d = project_3d_to_2d(corners_3d, camera_matrix)
@@ -135,39 +136,62 @@ def draw_3d_bbox(frame, corners_3d, camera_matrix, color=(0, 255, 0), thickness=
     
     h, w = frame.shape[:2]
     
-    # Define edges of the 3D box (12 edges of a cube)
-    # Front face (closer to camera) - draw with full color and thickness
+    # Define all 12 edges of the 3D cube
+    # Front face (closer to camera) - indices 0,1,2,3
     front_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
-    # Back face (farther from camera) - draw with lighter/dashed style
+    # Back face (farther from camera) - indices 4,5,6,7
     back_edges = [(4, 5), (5, 6), (6, 7), (7, 4)]
-    # Connecting edges (depth edges)
+    # Connecting edges (depth edges connecting front to back)
     connecting_edges = [(0, 4), (1, 5), (2, 6), (3, 7)]
     
-    # Draw front face (thicker, brighter)
+    # Helper function to check if point is in bounds
+    def in_bounds(pt):
+        return 0 <= pt[0] < w and 0 <= pt[1] < h
+    
+    # Helper function to draw line if both points are in bounds
+    def safe_line(pt1, pt2, col, thick):
+        if in_bounds(pt1) and in_bounds(pt2):
+            cv2.line(frame, pt1, pt2, col, thick)
+    
+    # Draw front face with thick, bright lines (most visible)
+    front_thickness = max(2, thickness + 1)
     for edge in front_edges:
         pt1 = tuple(corners_2d[edge[0]])
         pt2 = tuple(corners_2d[edge[1]])
-        if (0 <= pt1[0] < w and 0 <= pt1[1] < h and
-            0 <= pt2[0] < w and 0 <= pt2[1] < h):
-            cv2.line(frame, pt1, pt2, color, thickness + 1)
+        safe_line(pt1, pt2, color, front_thickness)
     
-    # Draw back face (thinner, slightly darker to show depth)
-    back_color = tuple(int(c * 0.6) for c in color)  # Darker version
+    # Draw back face with medium thickness, slightly darker
+    back_color = tuple(int(c * 0.7) for c in color)  # Slightly darker
+    back_thickness = max(1, thickness)
     for edge in back_edges:
         pt1 = tuple(corners_2d[edge[0]])
         pt2 = tuple(corners_2d[edge[1]])
-        if (0 <= pt1[0] < w and 0 <= pt1[1] < h and
-            0 <= pt2[0] < w and 0 <= pt2[1] < h):
-            cv2.line(frame, pt1, pt2, back_color, max(1, thickness - 1))
+        safe_line(pt1, pt2, back_color, back_thickness)
     
-    # Draw connecting edges (depth lines)
+    # Draw connecting edges (depth lines) with dashed style
+    # These show the depth dimension of the cube
     for edge in connecting_edges:
         pt1 = tuple(corners_2d[edge[0]])
         pt2 = tuple(corners_2d[edge[1]])
-        if (0 <= pt1[0] < w and 0 <= pt1[1] < h and
-            0 <= pt2[0] < w and 0 <= pt2[1] < h):
-            # Draw dashed line for depth edges
-            draw_dashed_line(frame, pt1, pt2, color, thickness)
+        if in_bounds(pt1) or in_bounds(pt2):  # Draw if at least one point is visible
+            # Use solid line if both points visible, dashed if partially visible
+            if in_bounds(pt1) and in_bounds(pt2):
+                draw_dashed_line(frame, pt1, pt2, color, max(1, thickness - 1), dash_length=8)
+            else:
+                # Clip to bounds and draw
+                if in_bounds(pt1):
+                    safe_line(pt1, pt1, color, 2)  # Draw corner marker
+                if in_bounds(pt2):
+                    safe_line(pt2, pt2, color, 2)  # Draw corner marker
+    
+    # Draw corner markers for better visibility (small circles at corners)
+    corner_radius = 3
+    for corner in corners_2d:
+        pt = tuple(corner)
+        if in_bounds(pt):
+            cv2.circle(frame, pt, corner_radius, color, -1)
+            # Add a darker outline for contrast
+            cv2.circle(frame, pt, corner_radius + 1, (0, 0, 0), 1)
     
     return frame
 

@@ -52,11 +52,18 @@ object_dimensions_db = {
     'potted plant': {'width': 0.3, 'height': 0.5, 'length': 0.3},
 }
 
-# Colors for different classes
+# Colors for different classes (white, green, yellow like reference)
 bbox_colors = [
-    (164, 120, 87), (68, 148, 228), (93, 97, 209), (178, 182, 133),
-    (88, 159, 106), (96, 202, 231), (159, 124, 168),
-    (169, 162, 241), (98, 118, 150), (172, 176, 184)
+    (255, 255, 255),  # White
+    (0, 255, 0),      # Green
+    (0, 255, 255),    # Yellow (cyan in BGR)
+    (255, 255, 0),    # Cyan
+    (0, 165, 255),    # Orange
+    (255, 0, 255),    # Magenta
+    (128, 0, 128),    # Purple
+    (255, 192, 203),  # Pink
+    (0, 128, 255),    # Blue
+    (255, 165, 0),    # Blue (BGR)
 ]
 
 # FPS tracking
@@ -104,11 +111,12 @@ while True:
             
             # Draw depth overlay first (so 3D box appears on top)
             if depth_map is not None:
-                vis_frame = draw_depth_overlay(vis_frame, bbox, depth_map, alpha=0.3)
+                vis_frame = draw_depth_overlay(vis_frame, bbox, depth_map, alpha=0.25)
             
-            # Draw 3D bounding box (wireframe)
+            # Draw 3D bounding box (wireframe cube) - prominent white/green/yellow
             color = bbox_colors[cls_id % len(bbox_colors)]
-            vis_frame = draw_3d_bbox(vis_frame, corners_3d, camera_matrix, color, 2)
+            # Use thicker lines for better visibility
+            vis_frame = draw_3d_bbox(vis_frame, corners_3d, camera_matrix, color, 3)
             
             # Add label with depth info
             x1, y1, x2, y2 = bbox
