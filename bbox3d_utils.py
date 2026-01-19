@@ -36,12 +36,13 @@ def create_3d_bbox_from_2d(bbox_2d, depth, camera_matrix,
                           object_dimensions=None, default_dimensions=(1.0, 1.0, 1.0)):
     """
     Create a 3D bounding box from 2D detection and depth.
+    Dimensions are calculated from 2D bbox size to ensure proper fit.
     
     Args:
         bbox_2d: 2D bounding box (x1, y1, x2, y2)
         depth: Depth value at bbox center (in meters)
         camera_matrix: 3x3 camera intrinsic matrix
-        object_dimensions: Dict with 'width', 'height', 'length' (in meters)
+        object_dimensions: Dict with 'width', 'height', 'length' ratios (optional)
         default_dimensions: Default (width, height, length) if object_dimensions is None
     
     Returns:
@@ -54,13 +55,31 @@ def create_3d_bbox_from_2d(bbox_2d, depth, camera_matrix,
     cx = camera_matrix[0, 2]
     cy = camera_matrix[1, 2]
     
-    # Get dimensions
+    # Calculate 2D bounding box dimensions in pixels
+    bbox_width_px = x2 - x1
+    bbox_height_px = y2 - y1
+    
+    # Calculate 3D dimensions from 2D bbox and depth
+    # Real size = (pixel size * depth) / focal_length
+    width_3d = (bbox_width_px * depth) / fx
+    height_3d = (bbox_height_px * depth) / fy
+    
+    # For length (depth dimension), use aspect ratio from known dimensions if available
+    # Otherwise estimate from width
     if object_dimensions:
-        width = object_dimensions.get('width', default_dimensions[0])
-        height = object_dimensions.get('height', default_dimensions[1])
-        length = object_dimensions.get('length', default_dimensions[2])
+        # Use aspect ratio from known dimensions
+        known_width = object_dimensions.get('width', width_3d)
+        known_length = object_dimensions.get('length', width_3d * 0.5)
+        length_ratio = known_length / known_width if known_width > 0 else 0.5
+        length_3d = width_3d * length_ratio
     else:
-        width, height, length = default_dimensions
+        # Default: assume object is roughly as deep as it is wide
+        length_3d = width_3d * 0.5
+    
+    # Ensure minimum dimensions to avoid tiny boxes
+    width_3d = max(width_3d, 0.1)
+    height_3d = max(height_3d, 0.1)
+    length_3d = max(length_3d, 0.1)
     
     # Calculate 3D center from 2D center and depth
     center_x_2d = (x1 + x2) / 2
@@ -74,10 +93,10 @@ def create_3d_bbox_from_2d(bbox_2d, depth, camera_matrix,
     center_3d = np.array([center_3d_x, center_3d_y, center_3d_z])
     
     # Create 3D box corners (assuming upright orientation, facing camera)
-    # Box is centered at center_3d with dimensions width, height, length
-    half_w = width / 2
-    half_h = height / 2
-    half_l = length / 2
+    # Box is centered at center_3d with calculated dimensions
+    half_w = width_3d / 2
+    half_h = height_3d / 2
+    half_l = length_3d / 2
     
     # 8 corners of the 3D box
     corners_3d = np.array([
