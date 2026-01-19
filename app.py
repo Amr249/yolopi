@@ -8,14 +8,20 @@ from yolo3d_detector import YOLODetector, draw_detection_with_depth
 app = Flask(__name__)
 
 # ==============================
-# INITIALIZE YOLO-D DETECTOR (FPS OPTIMIZED)
+# INITIALIZE YOLO-D DETECTOR (FPS OPTIMIZED + PHASE 2)
 # ==============================
-# FPS OPTIMIZATION CONSTANTS
+# FPS OPTIMIZATION CONSTANTS (PHASE 1)
 PROCESSING_WIDTH = 640   # Processing resolution width (lower = faster)
 PROCESSING_HEIGHT = 384  # Processing resolution height (lower = faster)
 DEPTH_THROTTLE_INTERVAL = 4  # Run depth every N frames (higher = faster)
 
-print("Initializing YOLO-D detector (FPS optimized)...")
+# PHASE 2: Depth normalization and meter estimation configuration
+ENABLE_METERS = False  # Set True to enable meter conversion (requires calibration)
+CALIBRATION_NEAR_M = 0.5  # Reference distance 1 (meters)
+CALIBRATION_FAR_M = 2.0    # Reference distance 2 (meters)
+# Calibration values will be set during calibration (if enabled)
+
+print("Initializing YOLO-D detector (FPS optimized + PHASE 2)...")
 detector = YOLODetector(
     yolo_model_path="yolo11n.pt",
     depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
@@ -24,7 +30,17 @@ detector = YOLODetector(
     conf_threshold=0.5,
     processing_resolution=(PROCESSING_WIDTH, PROCESSING_HEIGHT)  # FPS optimization
 )
-print("✓ YOLO-D detector ready (FPS optimized)")
+
+# PHASE 2: Configure meter estimation (if enabled)
+if ENABLE_METERS:
+    detector.enable_meters = True
+    detector.calibration_near_m = CALIBRATION_NEAR_M
+    detector.calibration_far_m = CALIBRATION_FAR_M
+    print(f"✓ Meter estimation enabled (calibration: {CALIBRATION_NEAR_M}m - {CALIBRATION_FAR_M}m)")
+else:
+    print("✓ Relative depth mode (normalized [0,1])")
+
+print("✓ YOLO-D detector ready (FPS optimized + PHASE 2)")
 
 # ==============================
 # CAMERA (USB CAM OR PI CAM)
@@ -90,11 +106,22 @@ def generate_frames():
             draw_detection_with_depth(display_frame, detection, color)
             
             object_count += 1
-            current_detections.append({
+            
+            # PHASE 2: Include zone and distance information in stats
+            det_info = {
                 'label': detection['class'],
                 'confidence': int(detection['confidence'] * 100),
-                'depth': round(detection['depth'], 2)
-            })
+                'zone': detection.get('zone', 'Unknown'),
+                'normalized_depth': round(detection.get('normalized_depth', 0), 2) if detection.get('normalized_depth') is not None else None
+            }
+            
+            # Add distance in meters if available
+            if detection.get('distance_m') is not None:
+                det_info['distance_m'] = round(detection['distance_m'], 2)
+            elif detection.get('depth') is not None:  # Backward compatibility
+                det_info['depth'] = round(detection['depth'], 2)
+            
+            current_detections.append(det_info)
 
         # FPS OPTIMIZATION: Calculate FPS using time delta
         frame_end_time = time.time()
@@ -109,11 +136,13 @@ def generate_frames():
         else:
             avg_fps = 0
         
-        # Update global stats
+        # PHASE 2: Update global stats with depth mode info
         with stats_lock:
             stats['object_count'] = object_count
             stats['fps'] = avg_fps
             stats['detections'] = current_detections
+            stats['depth_mode'] = "Meters" if detector.enable_meters else "Relative"
+            stats['normalization_method'] = "Percentile (p5..p95)"
 
         # FPS OPTIMIZATION: Draw FPS overlay on frame
         cv2.putText(display_frame, f"Objects: {object_count}",
@@ -123,15 +152,23 @@ def generate_frames():
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, (0, 255, 255), 2)
         
-        # Optional: Draw depth map indicator
+        # PHASE 2: Draw depth mode indicator
         if depth_map is not None:
-            cv2.putText(display_frame, "Depth: ON",
-                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.6, (0, 255, 0), 2)
+            depth_status = "Depth: ON"
+            depth_color = (0, 255, 0)
         else:
-            cv2.putText(display_frame, "Depth: CACHED",
-                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.6, (255, 255, 0), 2)
+            depth_status = "Depth: CACHED"
+            depth_color = (255, 255, 0)
+        
+        cv2.putText(display_frame, depth_status,
+                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                   0.6, depth_color, 2)
+        
+        # PHASE 2: Display depth mode (Relative vs Calibrated)
+        depth_mode = "Meters" if detector.enable_meters else "Relative"
+        cv2.putText(display_frame, f"Mode: {depth_mode}",
+                   (10, 120), cv2.FONT_HERSHEY_SIMPLEX,
+                   0.5, (255, 255, 255), 1)
 
         # Encode frame as JPEG with lower quality for better performance
         ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -377,6 +414,14 @@ def index():
                         <span class="stat-label">FPS</span>
                         <span class="stat-value" id="fps">0</span>
                     </div>
+                    <div class="stat-item" id="depthModeItem" style="display: none;">
+                        <span class="stat-label">Depth Mode</span>
+                        <span class="stat-value" id="depthMode">Relative</span>
+                    </div>
+                    <div class="stat-item" id="normalizationItem" style="display: none;">
+                        <span class="stat-label">Normalization</span>
+                        <span class="stat-value" id="normalization">Percentile (p5..p95)</span>
+                    </div>
                     
                     <div class="detections-list">
                         <h3>🔍 Current Detections</h3>
@@ -401,21 +446,55 @@ def index():
                         document.getElementById('objectCount').textContent = data.object_count;
                         document.getElementById('fps').textContent = data.fps.toFixed(1);
                         
+                        // PHASE 2: Update depth mode and normalization info
+                        if (data.depth_mode) {
+                            document.getElementById('depthMode').textContent = data.depth_mode;
+                            document.getElementById('depthModeItem').style.display = 'flex';
+                        }
+                        if (data.normalization_method) {
+                            document.getElementById('normalization').textContent = data.normalization_method;
+                            document.getElementById('normalizationItem').style.display = 'flex';
+                        }
+                        
                         const detectionsList = document.getElementById('detectionsList');
                         if (data.detections && data.detections.length > 0) {
-                            detectionsList.innerHTML = data.detections.map(det => 
-                                `<div class="detection-item">
+                            detectionsList.innerHTML = data.detections.map(det => {
+                                // PHASE 2: Format distance display
+                                let distanceText = '';
+                                if (det.distance_m !== undefined) {
+                                    distanceText = `📏 ${det.distance_m}m`;
+                                } else if (det.depth !== undefined) {
+                                    distanceText = `📏 ${det.depth}m`;
+                                } else if (det.normalized_depth !== undefined) {
+                                    distanceText = `📏 Rel: ${det.normalized_depth}`;
+                                } else {
+                                    distanceText = '📏 N/A';
+                                }
+                                
+                                // PHASE 2: Zone display with color
+                                const zoneColors = {
+                                    'Near': '#4caf50',
+                                    'Medium': '#ffc107',
+                                    'Far': '#ff9800',
+                                    'Unknown': '#999'
+                                };
+                                const zoneColor = zoneColors[det.zone] || '#999';
+                                
+                                return `<div class="detection-item">
                                     <div style="display: flex; flex-direction: column; gap: 5px;">
                                         <div style="display: flex; justify-content: space-between; align-items: center;">
                                             <span class="detection-label">${det.label}</span>
                                             <span class="detection-confidence">${det.confidence}%</span>
                                         </div>
                                         <div style="font-size: 0.85em; color: #667eea; font-weight: 600;">
-                                            📏 Distance: ${det.depth}m
+                                            ${distanceText}
+                                        </div>
+                                        <div style="font-size: 0.85em; color: ${zoneColor}; font-weight: 600;">
+                                            🎯 Zone: ${det.zone}
                                         </div>
                                     </div>
-                                </div>`
-                            ).join('');
+                                </div>`;
+                            }).join('');
                         } else {
                             detectionsList.innerHTML = '<div class="no-detections">No objects detected</div>';
                         }

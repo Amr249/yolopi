@@ -118,9 +118,21 @@ while True:
             # Use thicker lines for better visibility
             vis_frame = draw_3d_bbox(vis_frame, corners_3d, camera_matrix, color, 3)
             
-            # Add label with depth info
+            # PHASE 2: Add label with zone and distance info
             x1, y1, x2, y2 = bbox
-            label_text = f"S:{conf:.2f} D:{depth:.2f} (median) {label} ID:{cls_id}"
+            zone = det.get('zone', 'Unknown')
+            distance_m = det.get('distance_m', None)
+            normalized_depth = det.get('normalized_depth', None)
+            
+            # Format distance display
+            if distance_m is not None:
+                dist_text = f"{distance_m:.2f}m"
+            elif normalized_depth is not None:
+                dist_text = f"Rel:{normalized_depth:.2f}"
+            else:
+                dist_text = "N/A"
+            
+            label_text = f"S:{conf:.2f} D:{dist_text} Zone:{zone} {label} ID:{cls_id}"
             
             # Draw label background
             (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
