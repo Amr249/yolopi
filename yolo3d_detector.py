@@ -258,19 +258,31 @@ class YOLODetector:
                 # Fallback to geometry-based estimation
                 depth = self.estimate_depth_geometry((x1, y1, x2, y2), label)
             
-            # Create detection with depth
+            # Get object dimensions for 3D box
+            object_dims = self.object_dimensions.get(label, None)
+            
+            # Create detection with depth and 3D info
             detection = {
                 'bbox': (x1, y1, x2, y2),
                 'class': label,
                 'confidence': conf,
                 'depth': depth,
-                'class_id': cls_id
+                'class_id': cls_id,
+                'object_dimensions': object_dims
             }
             
             detections.append(detection)
         
         self.frame_count += 1
         return detections, depth_map
+    
+    def get_camera_matrix(self):
+        """Get camera intrinsic matrix."""
+        return np.array([
+            [self.fx, 0, self.cx],
+            [0, self.fy, self.cy],
+            [0, 0, 1]
+        ], dtype=np.float32)
 
 
 def draw_detection_with_depth(frame, detection, color):
