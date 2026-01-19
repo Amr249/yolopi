@@ -532,6 +532,137 @@ class YOLODetector:
         self.frame_count += 1
         return detections, depth_map, original_frame
     
+    def filter_detections_by_zone(self, detections, allowed_zones):
+        """
+        PHASE 3A: Filter detections by distance zone.
+        
+        Args:
+            detections: List of detection dictionaries
+            allowed_zones: List of zone names to keep (e.g., ["Near", "Medium"])
+            
+        Returns:
+            filtered: List of detections in allowed zones
+        """
+        if not allowed_zones:
+            return detections  # No filtering if empty
+        
+        filtered = []
+        for det in detections:
+            zone = det.get('zone', 'Unknown')
+            if zone in allowed_zones:
+                filtered.append(det)
+        
+        return filtered
+    
+    def filter_detections_by_class(self, detections, target_classes):
+        """
+        PHASE 3A: Filter detections by class.
+        
+        Args:
+            detections: List of detection dictionaries
+            target_classes: List of class names to keep (empty = all classes)
+            
+        Returns:
+            filtered: List of detections matching target classes
+        """
+        if not target_classes:
+            return detections  # No filtering if empty
+        
+        filtered = []
+        for det in detections:
+            if det.get('class') in target_classes:
+                filtered.append(det)
+        
+        return filtered
+    
+    def find_nearest_object(self, detections):
+        """
+        PHASE 3A: Find the nearest object from detections.
+        
+        Uses distance_m if available (calibrated), else normalized_depth.
+        Nearest = smallest distance value.
+        
+        Args:
+            detections: List of detection dictionaries
+            
+        Returns:
+            nearest: Dictionary with nearest object info, or None
+        """
+        if not detections:
+            return None
+        
+        nearest = None
+        min_distance = float('inf')
+        
+        for det in detections:
+            # Prefer meters if available, else use normalized depth
+            distance = None
+            if det.get('distance_m') is not None:
+                distance = det.get('distance_m')
+            elif det.get('normalized_depth') is not None:
+                distance = det.get('normalized_depth')
+            
+            if distance is not None and distance < min_distance:
+                min_distance = distance
+                nearest = {
+                    'class': det.get('class'),
+                    'confidence': det.get('confidence'),
+                    'zone': det.get('zone', 'Unknown'),
+                    'distance': distance,
+                    'distance_m': det.get('distance_m'),
+                    'normalized_depth': det.get('normalized_depth'),
+                    'bbox': det.get('bbox')
+                }
+        
+        return nearest
+    
+    def compute_action(self, filtered_detections, nearest_object, frame_width=640):
+        """
+        PHASE 3A: Compute robotics action based on distance zones.
+        
+        Rule-based policy:
+        - If any object in Near zone => STOP (or AVOID_LEFT/AVOID_RIGHT)
+        - Else if any object in Medium zone => SLOW_DOWN
+        - Else => PROCEED
+        
+        Optional: AVOID_LEFT / AVOID_RIGHT based on nearest object position.
+        
+        Args:
+            filtered_detections: List of filtered detections
+            nearest_object: Nearest object dict or None
+            frame_width: Frame width for computing avoid direction (default 640)
+            
+        Returns:
+            action: "STOP", "SLOW_DOWN", "PROCEED", "AVOID_LEFT", or "AVOID_RIGHT"
+            reason: Human-readable reason for the action
+        """
+        if not filtered_detections:
+            return "PROCEED", "No objects detected"
+        
+        # Check for Near zone objects (highest priority)
+        near_objects = [d for d in filtered_detections if d.get('zone') == 'Near']
+        if near_objects:
+            # Optional: Determine avoid direction based on nearest object position
+            if nearest_object and nearest_object.get('bbox'):
+                bbox = nearest_object['bbox']
+                center_x = (bbox[0] + bbox[2]) / 2
+                frame_center = frame_width / 2
+                
+                if center_x < frame_center - 50:  # Object on left
+                    return "AVOID_RIGHT", f"Near object: {nearest_object['class']} (left side)"
+                elif center_x > frame_center + 50:  # Object on right
+                    return "AVOID_LEFT", f"Near object: {nearest_object['class']} (right side)"
+            
+            return "STOP", f"Near object: {nearest_object['class'] if nearest_object else 'unknown'}"
+        
+        # Check for Medium zone objects
+        medium_objects = [d for d in filtered_detections if d.get('zone') == 'Medium']
+        if medium_objects:
+            return "SLOW_DOWN", f"Medium zone object: {nearest_object['class'] if nearest_object else 'unknown'}"
+        
+        # Default: proceed
+        return "PROCEED", "All clear"
+    
     def get_camera_matrix(self):
         """Get camera intrinsic matrix."""
         return np.array([

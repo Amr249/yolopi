@@ -21,6 +21,13 @@ CALIBRATION_NEAR_M = 0.5  # Reference distance 1 (meters)
 CALIBRATION_FAR_M = 2.0    # Reference distance 2 (meters)
 # Calibration values will be set during calibration (if enabled)
 
+# PHASE 3A: Distance-based filtering and robotics actions
+ENABLE_DISTANCE_FILTERING = True  # Enable zone-based filtering
+ALLOW_ZONES = ["Near", "Medium"]  # Zones to include in filtered detections (exclude "Far")
+TARGET_CLASSES = []  # Empty = allow all classes; otherwise only these classes trigger actions
+SHOW_ALL_DETECTIONS = False  # If True, show all detections in UI (debug mode); else show filtered only
+ACTION_DEBOUNCE_FRAMES = 3  # Action must persist for N frames before changing (reduces flicker)
+
 print("Initializing YOLO-D detector (FPS optimized + PHASE 2)...")
 detector = YOLODetector(
     yolo_model_path="yolo11n.pt",
@@ -53,9 +60,37 @@ cap.set(4, 480)
 stats = {
     'object_count': 0,
     'fps': 0,
-    'detections': []
+    'detections': [],
+    'filtered_count': 0,
+    'nearest_object': None,
+    'action': 'PROCEED',
+    'action_reason': 'Initializing...',
+    'depth_mode': 'Relative',
+    'normalization_method': 'Percentile (p5..p95)'
 }
 stats_lock = threading.Lock()
+
+# PHASE 3A: Action state for debouncing
+action_history = []  # Store last N actions for debouncing
+action_history_max = ACTION_DEBOUNCE_FRAMES
+
+# Global stats
+stats = {
+    'object_count': 0,
+    'fps': 0,
+    'detections': [],
+    'filtered_count': 0,
+    'nearest_object': None,
+    'action': 'PROCEED',
+    'action_reason': 'Initializing...',
+    'depth_mode': 'Relative',
+    'normalization_method': 'Percentile (p5..p95)'
+}
+stats_lock = threading.Lock()
+
+# PHASE 3A: Action state for debouncing
+action_history = []  # Store last N actions for debouncing
+action_history_max = ACTION_DEBOUNCE_FRAMES
 
 # Bounding box colors
 bbox_colors = [
@@ -94,11 +129,48 @@ def generate_frames():
         # Depth throttling is controlled by detector's frame counter
         detections, depth_map, display_frame = detector.detect(frame, update_depth=None)
 
-        object_count = 0
+        # PHASE 3A: Filter detections and compute actions
+        filtered_detections = detections
+        if ENABLE_DISTANCE_FILTERING:
+            # Filter by zone
+            filtered_detections = detector.filter_detections_by_zone(detections, ALLOW_ZONES)
+            # Filter by class (if TARGET_CLASSES specified)
+            if TARGET_CLASSES:
+                filtered_detections = detector.filter_detections_by_class(filtered_detections, TARGET_CLASSES)
+        
+        # Find nearest object
+        nearest_object = detector.find_nearest_object(filtered_detections)
+        
+        # Compute action (pass frame width for avoid direction calculation)
+        h, w = display_frame.shape[:2]
+        action, action_reason = detector.compute_action(filtered_detections, nearest_object, frame_width=w)
+        
+        # PHASE 3A: Action debouncing (prevent flicker)
+        action_history.append(action)
+        if len(action_history) > action_history_max:
+            action_history.pop(0)
+        
+        # Use most common action in history (debounced)
+        if len(action_history) >= action_history_max:
+            from collections import Counter
+            action_counts = Counter(action_history)
+            debounced_action = action_counts.most_common(1)[0][0]
+            # Only update reason if action changed
+            if debounced_action != action:
+                # Recompute reason for debounced action
+                h, w = display_frame.shape[:2]
+                action, action_reason = detector.compute_action(filtered_detections, nearest_object, frame_width=w)
+            action = debounced_action
+
+        # Determine which detections to display
+        display_detections = filtered_detections if not SHOW_ALL_DETECTIONS else detections
+        
+        object_count = len(display_detections)
+        filtered_count = len(filtered_detections)
         current_detections = []
 
         # Draw detections with depth information
-        for detection in detections:
+        for detection in display_detections:
             cls_id = detection['class_id']
             color = bbox_colors[cls_id % len(bbox_colors)]
             
@@ -136,11 +208,15 @@ def generate_frames():
         else:
             avg_fps = 0
         
-        # PHASE 2: Update global stats with depth mode info
+        # PHASE 3A: Update global stats with action and nearest object info
         with stats_lock:
             stats['object_count'] = object_count
             stats['fps'] = avg_fps
             stats['detections'] = current_detections
+            stats['filtered_count'] = filtered_count
+            stats['nearest_object'] = nearest_object
+            stats['action'] = action
+            stats['action_reason'] = action_reason
             stats['depth_mode'] = "Meters" if detector.enable_meters else "Relative"
             stats['normalization_method'] = "Percentile (p5..p95)"
 
@@ -169,6 +245,32 @@ def generate_frames():
         cv2.putText(display_frame, f"Mode: {depth_mode}",
                    (10, 120), cv2.FONT_HERSHEY_SIMPLEX,
                    0.5, (255, 255, 255), 1)
+        
+        # PHASE 3A: Display action and nearest object
+        action_colors = {
+            'STOP': (0, 0, 255),           # Red
+            'SLOW_DOWN': (0, 165, 255),    # Orange
+            'PROCEED': (0, 255, 0),        # Green
+            'AVOID_LEFT': (255, 0, 255),   # Magenta
+            'AVOID_RIGHT': (255, 0, 255)   # Magenta
+        }
+        action_color = action_colors.get(action, (255, 255, 255))
+        
+        # Draw action prominently
+        h, w = display_frame.shape[:2]
+        cv2.putText(display_frame, f"ACTION: {action}",
+                   (w - 300, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                   0.8, action_color, 3)
+        cv2.putText(display_frame, action_reason,
+                   (w - 300, 60), cv2.FONT_HERSHEY_SIMPLEX,
+                   0.5, (255, 255, 255), 2)
+        
+        # Draw nearest object info
+        if nearest_object:
+            dist_text = f"{nearest_object['distance']:.2f}m" if nearest_object.get('distance_m') else f"Rel:{nearest_object.get('normalized_depth', 0):.2f}"
+            cv2.putText(display_frame, f"NEAREST: {nearest_object['class']} {dist_text} ({nearest_object['zone']})",
+                       (w - 300, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.5, (0, 255, 255), 2)
 
         # Encode frame as JPEG with lower quality for better performance
         ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -423,6 +525,22 @@ def index():
                         <span class="stat-value" id="normalization">Percentile (p5..p95)</span>
                     </div>
                     
+                    <!-- PHASE 3A: Robot Mode Panel -->
+                    <div style="background: rgba(255, 255, 255, 0.95); padding: 20px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2); margin-top: 20px;">
+                        <h2 style="color: #667eea; margin-bottom: 15px; font-size: 1.5em; border-bottom: 2px solid #667eea; padding-bottom: 10px;">🤖 Robot Mode</h2>
+                        <div style="background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); padding: 20px; border-radius: 10px; margin-bottom: 15px; text-align: center;">
+                            <div style="font-size: 2em; font-weight: 700; color: #667eea; margin-bottom: 10px;" id="robotAction">PROCEED</div>
+                            <div style="font-size: 0.9em; color: #666;" id="robotReason">Initializing...</div>
+                        </div>
+                        <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-top: 15px;">
+                            <div style="font-weight: 600; color: #333; margin-bottom: 10px;">Nearest Object:</div>
+                            <div id="nearestObjectInfo" style="color: #666; font-size: 0.9em;">None detected</div>
+                        </div>
+                        <div style="margin-top: 15px; font-size: 0.85em; color: #999;">
+                            Filtered: <span id="filteredCount">0</span> / Total: <span id="totalCount">0</span>
+                        </div>
+                    </div>
+                    
                     <div class="detections-list">
                         <h3>🔍 Current Detections</h3>
                         <div id="detectionsList">
@@ -454,6 +572,40 @@ def index():
                         if (data.normalization_method) {
                             document.getElementById('normalization').textContent = data.normalization_method;
                             document.getElementById('normalizationItem').style.display = 'flex';
+                        }
+                        
+                        // PHASE 3A: Update robot mode panel
+                        if (data.action) {
+                            const actionElement = document.getElementById('robotAction');
+                            actionElement.textContent = data.action;
+                            // Color code actions
+                            const actionColors = {
+                                'STOP': '#ff0000',
+                                'SLOW_DOWN': '#ff9800',
+                                'PROCEED': '#4caf50',
+                                'AVOID_LEFT': '#9c27b0',
+                                'AVOID_RIGHT': '#9c27b0'
+                            };
+                            actionElement.style.color = actionColors[data.action] || '#667eea';
+                        }
+                        if (data.action_reason) {
+                            document.getElementById('robotReason').textContent = data.action_reason;
+                        }
+                        if (data.nearest_object) {
+                            const obj = data.nearest_object;
+                            const distText = obj.distance_m ? `${obj.distance_m.toFixed(2)}m` : `Rel:${obj.normalized_depth?.toFixed(2) || 'N/A'}`;
+                            document.getElementById('nearestObjectInfo').innerHTML = 
+                                `<strong>${obj.class}</strong> (${obj.confidence}%)<br>` +
+                                `Distance: ${distText}<br>` +
+                                `Zone: <span style="color: ${obj.zone === 'Near' ? '#4caf50' : obj.zone === 'Medium' ? '#ffc107' : '#ff9800'}">${obj.zone}</span>`;
+                        } else {
+                            document.getElementById('nearestObjectInfo').textContent = 'None detected';
+                        }
+                        if (data.filtered_count !== undefined) {
+                            document.getElementById('filteredCount').textContent = data.filtered_count;
+                        }
+                        if (data.object_count !== undefined) {
+                            document.getElementById('totalCount').textContent = data.object_count;
                         }
                         
                         const detectionsList = document.getElementById('detectionsList');
@@ -520,6 +672,27 @@ def video_feed():
 def get_stats():
     with stats_lock:
         return jsonify(stats)
+
+@app.route('/robot_state')
+def get_robot_state():
+    """
+    PHASE 3A: JSON endpoint for robot state.
+    Returns current action, nearest object, and system status.
+    """
+    import time
+    with stats_lock:
+        robot_state = {
+            'timestamp': time.time(),
+            'fps': stats.get('fps', 0),
+            'depth_mode': stats.get('depth_mode', 'Relative'),
+            'action': stats.get('action', 'PROCEED'),
+            'reason': stats.get('action_reason', 'Unknown'),
+            'nearest_object': stats.get('nearest_object'),
+            'filtered_count': stats.get('filtered_count', 0),
+            'total_count': stats.get('object_count', 0),
+            'normalization_method': stats.get('normalization_method', 'Percentile (p5..p95)')
+        }
+        return jsonify(robot_state)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, threaded=True)
