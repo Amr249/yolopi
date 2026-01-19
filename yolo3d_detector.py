@@ -25,21 +25,25 @@ class YOLODetector:
     def __init__(self, yolo_model_path="yolo11n.pt", 
                  depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
                  depth_input_size=(384, 384),
-                 depth_throttle=3,
-                 conf_threshold=0.5):
+                 depth_throttle=4,
+                 conf_threshold=0.5,
+                 processing_resolution=(640, 384)):
         """
-        Initialize YOLO-D detector.
+        Initialize YOLO-D detector with FPS optimizations for Raspberry Pi.
         
         Args:
             yolo_model_path: Path to YOLO model (.pt file)
             depth_model_name: HuggingFace model name for depth estimation
             depth_input_size: Input size for depth model (smaller = faster)
-            depth_throttle: Process depth every N frames (1 = every frame)
+            depth_throttle: Process depth every N frames (higher = faster, default 4)
             conf_threshold: Confidence threshold for detections
+            processing_resolution: Target resolution for processing (width, height)
+                                  Lower resolution = faster inference (default 640x384)
         """
         self.conf_threshold = conf_threshold
         self.depth_input_size = depth_input_size
         self.depth_throttle = depth_throttle
+        self.processing_resolution = processing_resolution  # (width, height)
         self.frame_count = 0
         
         # Load YOLO model for 2D detection
@@ -98,10 +102,10 @@ class YOLODetector:
     def estimate_depth_map(self, frame):
         """
         Estimate depth map from monocular image.
-        Optimized for Raspberry Pi CPU.
+        Optimized for Raspberry Pi CPU with torch.no_grad().
         
         Args:
-            frame: Input BGR image (numpy array)
+            frame: Input BGR image (numpy array) - should already be resized
             
         Returns:
             depth_map: Depth map (numpy array, same size as input)
@@ -114,13 +118,15 @@ class YOLODetector:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
             # Resize for faster processing (depth model input size)
+            # Frame is already resized to processing_resolution, so resize to depth_input_size
             h_orig, w_orig = frame.shape[:2]
             frame_resized = cv2.resize(frame_rgb, self.depth_input_size)
             
             # Preprocess for depth model
             inputs = self.depth_processor(images=frame_resized, return_tensors="pt")
             
-            # Inference with no gradient computation (CPU optimized)
+            # CRITICAL: Use torch.no_grad() for CPU inference (no gradient computation)
+            # This significantly reduces memory usage and speeds up inference
             with torch.no_grad():
                 outputs = self.depth_model(**inputs)
                 depth_pred = outputs.predicted_depth
@@ -128,7 +134,7 @@ class YOLODetector:
             # Post-process depth map
             depth_pred = depth_pred.squeeze().cpu().numpy()
             
-            # Resize back to original frame size
+            # Resize back to processing resolution (not original, for consistency)
             depth_map = cv2.resize(depth_pred, (w_orig, h_orig), 
                                  interpolation=cv2.INTER_LINEAR)
             
@@ -210,32 +216,56 @@ class YOLODetector:
         
         return depth
     
-    def detect(self, frame, update_depth=True):
+    def detect(self, frame, update_depth=None):
         """
-        Run YOLO-D detection pipeline.
+        Run YOLO-D detection pipeline with FPS optimizations.
+        
+        OPTIMIZATION: Frame is resized once to processing_resolution for faster inference.
+        OPTIMIZATION: Depth estimation is throttled (runs every N frames).
+        OPTIMIZATION: Uses torch.no_grad() for all inference operations.
         
         Args:
-            frame: Input BGR frame
-            update_depth: Whether to update depth map (throttled internally)
+            frame: Input BGR frame (will be resized internally)
+            update_depth: If None, uses throttling. If True/False, overrides throttling.
             
         Returns:
             detections: List of detections with depth info
-            depth_map: Current depth map (may be cached)
+            depth_map: Current depth map (may be cached from previous frame)
+            original_frame: Original frame before resizing (for display)
         """
-        # Step 1: YOLO 2D detection
+        # OPTIMIZATION 1: Resize frame ONCE to processing resolution
+        # This reduces computation for both YOLO and depth estimation
+        original_frame = frame.copy()
+        h_orig, w_orig = frame.shape[:2]
+        target_w, target_h = self.processing_resolution
+        
+        # Only resize if different from target
+        if (w_orig, h_orig) != (target_w, target_h):
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Step 1: YOLO 2D detection (runs every frame for smooth tracking)
+        # YOLO is fast enough to run every frame on Pi
+        # NOTE: Ultralytics YOLO automatically uses torch.no_grad() during inference
         results = self.yolo_model(frame, verbose=False)
         detections_2d = results[0].boxes
         
-        # Step 2: Depth estimation (throttled for performance)
+        # Step 2: Depth estimation (THROTTLED for performance)
+        # OPTIMIZATION 2: Depth runs every N frames, cached depth map reused
         depth_map = None
-        should_update_depth = (self.frame_count % self.depth_throttle == 0) or update_depth
+        if update_depth is None:
+            # Use throttling: run depth every depth_throttle frames
+            should_update_depth = (self.frame_count % self.depth_throttle == 0)
+        else:
+            # Override throttling if explicitly requested
+            should_update_depth = update_depth
         
         if should_update_depth and self.depth_available:
+            # Run depth estimation (expensive operation)
             depth_map = self.estimate_depth_map(frame)
             self.cached_depth_map = depth_map
             self.cached_depth_frame = frame.copy()
         elif self.cached_depth_map is not None:
-            # Reuse cached depth map
+            # OPTIMIZATION: Reuse cached depth map (no computation)
             depth_map = self.cached_depth_map
         
         # Step 3: Fuse 2D detections with depth
@@ -246,7 +276,7 @@ class YOLODetector:
             if conf < self.conf_threshold:
                 continue
             
-            # Extract 2D bounding box
+            # Extract 2D bounding box (in processing resolution coordinates)
             x1, y1, x2, y2 = map(int, det.xyxy.cpu().numpy().squeeze())
             cls_id = int(det.cls.item())
             label = self.labels[cls_id]
@@ -258,12 +288,21 @@ class YOLODetector:
                 # Fallback to geometry-based estimation
                 depth = self.estimate_depth_geometry((x1, y1, x2, y2), label)
             
+            # Scale bbox coordinates back to original frame size if needed
+            if (w_orig, h_orig) != (target_w, target_h):
+                scale_x = w_orig / target_w
+                scale_y = h_orig / target_h
+                x1 = int(x1 * scale_x)
+                y1 = int(y1 * scale_y)
+                x2 = int(x2 * scale_x)
+                y2 = int(y2 * scale_y)
+            
             # Get object dimensions for 3D box
             object_dims = self.object_dimensions.get(label, None)
             
             # Create detection with depth and 3D info
             detection = {
-                'bbox': (x1, y1, x2, y2),
+                'bbox': (x1, y1, x2, y2),  # In original frame coordinates
                 'class': label,
                 'confidence': conf,
                 'depth': depth,
@@ -273,8 +312,12 @@ class YOLODetector:
             
             detections.append(detection)
         
+        # Scale depth map back to original size if needed (for visualization)
+        if depth_map is not None and (w_orig, h_orig) != (target_w, target_h):
+            depth_map = cv2.resize(depth_map, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+        
         self.frame_count += 1
-        return detections, depth_map
+        return detections, depth_map, original_frame
     
     def get_camera_matrix(self):
         """Get camera intrinsic matrix."""

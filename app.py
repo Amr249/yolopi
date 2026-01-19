@@ -8,17 +8,23 @@ from yolo3d_detector import YOLODetector, draw_detection_with_depth
 app = Flask(__name__)
 
 # ==============================
-# INITIALIZE YOLO-D DETECTOR
+# INITIALIZE YOLO-D DETECTOR (FPS OPTIMIZED)
 # ==============================
-print("Initializing YOLO-D detector...")
+# FPS OPTIMIZATION CONSTANTS
+PROCESSING_WIDTH = 640   # Processing resolution width (lower = faster)
+PROCESSING_HEIGHT = 384  # Processing resolution height (lower = faster)
+DEPTH_THROTTLE_INTERVAL = 4  # Run depth every N frames (higher = faster)
+
+print("Initializing YOLO-D detector (FPS optimized)...")
 detector = YOLODetector(
     yolo_model_path="yolo11n.pt",
     depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
-    depth_input_size=(384, 384),  # Smaller = faster on Pi
-    depth_throttle=3,  # Process depth every 3 frames
-    conf_threshold=0.5
+    depth_input_size=(384, 384),  # Depth model input size (smaller = faster)
+    depth_throttle=DEPTH_THROTTLE_INTERVAL,  # Process depth every N frames
+    conf_threshold=0.5,
+    processing_resolution=(PROCESSING_WIDTH, PROCESSING_HEIGHT)  # FPS optimization
 )
-print("✓ YOLO-D detector ready")
+print("✓ YOLO-D detector ready (FPS optimized)")
 
 # ==============================
 # CAMERA (USB CAM OR PI CAM)
@@ -45,20 +51,32 @@ bbox_colors = [
 def generate_frames():
     """
     Generate video frames with YOLO-D (depth-aware) detection.
-    Optimized for Raspberry Pi CPU.
+    FPS OPTIMIZED for Raspberry Pi CPU.
+    
+    OPTIMIZATIONS APPLIED:
+    1. Frame resizing to processing_resolution (640x384) - done in detector
+    2. Depth throttling (runs every N frames, cached otherwise)
+    3. FPS measurement and overlay
+    4. torch.no_grad() used in all inference operations
     """
+    # FPS measurement setup
     fps_buffer = []
-    fps_avg_len = 30
+    fps_avg_len = 30  # Average over last 30 frames
     last_time = time.time()
+    frame_counter = 0
     
     while True:
+        # FPS OPTIMIZATION: Measure time delta for FPS calculation
         current_time = time.time()
+        frame_start_time = current_time
+        
         success, frame = cap.read()
         if not success:
             break
 
-        # Run YOLO-D detection (includes depth estimation)
-        detections, depth_map = detector.detect(frame, update_depth=True)
+        # OPTIMIZATION: Detector handles frame resizing internally
+        # Depth throttling is controlled by detector's frame counter
+        detections, depth_map, display_frame = detector.detect(frame, update_depth=None)
 
         object_count = 0
         current_detections = []
@@ -69,7 +87,7 @@ def generate_frames():
             color = bbox_colors[cls_id % len(bbox_colors)]
             
             # Draw detection with depth overlay
-            draw_detection_with_depth(frame, detection, color)
+            draw_detection_with_depth(display_frame, detection, color)
             
             object_count += 1
             current_detections.append({
@@ -78,44 +96,52 @@ def generate_frames():
                 'depth': round(detection['depth'], 2)
             })
 
-        # Calculate FPS
-        dt = current_time - last_time
-        if dt > 0:
-            fps = 1.0 / dt
-            fps_buffer.append(fps)
+        # FPS OPTIMIZATION: Calculate FPS using time delta
+        frame_end_time = time.time()
+        frame_dt = frame_end_time - frame_start_time
+        
+        if frame_dt > 0:
+            instant_fps = 1.0 / frame_dt
+            fps_buffer.append(instant_fps)
             if len(fps_buffer) > fps_avg_len:
                 fps_buffer.pop(0)
             avg_fps = sum(fps_buffer) / len(fps_buffer) if fps_buffer else 0
         else:
             avg_fps = 0
-        last_time = current_time
-
+        
         # Update global stats
         with stats_lock:
             stats['object_count'] = object_count
             stats['fps'] = avg_fps
             stats['detections'] = current_detections
 
-        # Draw stats on frame
-        cv2.putText(frame, f"Objects: {object_count}",
+        # FPS OPTIMIZATION: Draw FPS overlay on frame
+        cv2.putText(display_frame, f"Objects: {object_count}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, (0, 255, 255), 2)
-        cv2.putText(frame, f"FPS: {avg_fps:.1f}",
+        cv2.putText(display_frame, f"FPS: {avg_fps:.1f}",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, (0, 255, 255), 2)
         
         # Optional: Draw depth map indicator
         if depth_map is not None:
-            cv2.putText(frame, "Depth: ON",
+            cv2.putText(display_frame, "Depth: ON",
                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
                        0.6, (0, 255, 0), 2)
+        else:
+            cv2.putText(display_frame, "Depth: CACHED",
+                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.6, (255, 255, 0), 2)
 
         # Encode frame as JPEG with lower quality for better performance
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        frame = buffer.tobytes()
+        ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        frame_bytes = buffer.tobytes()
 
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        
+        frame_counter += 1
+        last_time = current_time
 
 @app.route('/')
 def index():

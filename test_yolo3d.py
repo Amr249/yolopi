@@ -84,11 +84,11 @@ while True:
         print("Failed to read frame")
         break
     
-    # Run detection
-    detections, depth_map = detector.detect(frame, update_depth=True)
+    # Run detection (FPS optimized - frame resizing and depth throttling handled internally)
+    detections, depth_map, display_frame = detector.detect(frame, update_depth=None)
     
-    # Create visualization frame
-    vis_frame = frame.copy()
+    # Use the display frame (already resized and optimized)
+    vis_frame = display_frame.copy()
     
     # Process each detection for 3D visualization
     detections_3d = []
