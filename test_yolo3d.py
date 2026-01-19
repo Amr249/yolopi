@@ -95,10 +95,20 @@ while True:
     
     for det in detections:
         bbox = det['bbox']
-        depth = det['depth']
         label = det['class']
         conf = det['confidence']
         cls_id = det['class_id']
+        
+        # PHASE 2: Get distance for 3D box (use distance_m if available, else normalized_depth)
+        depth_for_3d = det.get('distance_m', None)
+        if depth_for_3d is None:
+            # Use normalized_depth converted to approximate meters for 3D visualization
+            normalized_depth = det.get('normalized_depth', None)
+            if normalized_depth is not None:
+                # Rough conversion: assume normalized [0,1] maps to [0.5, 5.0] meters
+                depth_for_3d = 0.5 + normalized_depth * 4.5
+            else:
+                depth_for_3d = 2.0  # Default fallback
         
         # Get object dimensions
         obj_dims = object_dimensions_db.get(label, {'width': 1.0, 'height': 1.0, 'length': 1.0})
@@ -106,7 +116,7 @@ while True:
         # Create 3D bounding box
         try:
             corners_3d, center_3d = create_3d_bbox_from_2d(
-                bbox, depth, camera_matrix, obj_dims
+                bbox, depth_for_3d, camera_matrix, obj_dims
             )
             
             # Draw depth overlay first (so 3D box appears on top)
