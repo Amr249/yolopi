@@ -200,10 +200,11 @@ class YOLODetector:
             # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Resize for faster processing (depth model input size)
+            # CPU OPTIMIZATION: Resize for faster processing (depth model input size)
             # Frame is already resized to processing_resolution, so resize to depth_input_size
+            # Use INTER_AREA for downscaling (faster)
             h_orig, w_orig = frame.shape[:2]
-            frame_resized = cv2.resize(frame_rgb, self.depth_input_size)
+            frame_resized = cv2.resize(frame_rgb, self.depth_input_size, interpolation=cv2.INTER_AREA)
             
             # Preprocess for depth model
             inputs = self.depth_processor(images=frame_resized, return_tensors="pt")
@@ -217,7 +218,8 @@ class YOLODetector:
             # Post-process depth map
             depth_pred = depth_pred.squeeze().cpu().numpy()
             
-            # Resize back to processing resolution (not original, for consistency)
+            # CPU OPTIMIZATION: Resize back to processing resolution
+            # Use INTER_LINEAR for upscaling (depth is float, needs interpolation)
             depth_map = cv2.resize(depth_pred, (w_orig, h_orig), 
                                  interpolation=cv2.INTER_LINEAR)
             
@@ -432,9 +434,10 @@ class YOLODetector:
         h_orig, w_orig = frame.shape[:2]
         target_w, target_h = self.processing_resolution
         
-        # Only resize if different from target
+        # CPU OPTIMIZATION: Only resize if different from target
+        # Use INTER_AREA for downscaling (faster than INTER_LINEAR)
         if (w_orig, h_orig) != (target_w, target_h):
-            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
         
         # Step 1: YOLO 2D detection (runs every frame for smooth tracking)
         # YOLO is fast enough to run every frame on Pi
@@ -526,6 +529,7 @@ class YOLODetector:
             detections.append(detection)
         
         # Scale depth map back to original size if needed (for visualization)
+        # Use INTER_LINEAR for depth maps (preserves float precision)
         if depth_map is not None and (w_orig, h_orig) != (target_w, target_h):
             depth_map = cv2.resize(depth_map, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
         

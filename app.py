@@ -10,10 +10,12 @@ app = Flask(__name__)
 # ==============================
 # INITIALIZE YOLO-D DETECTOR (FPS OPTIMIZED + PHASE 2)
 # ==============================
-# FPS OPTIMIZATION CONSTANTS (PHASE 1)
-PROCESSING_WIDTH = 640   # Processing resolution width (lower = faster)
-PROCESSING_HEIGHT = 384  # Processing resolution height (lower = faster)
-DEPTH_THROTTLE_INTERVAL = 4  # Run depth every N frames (higher = faster)
+# FPS OPTIMIZATION CONSTANTS (PHASE 1) - CPU OPTIMIZED
+PROCESSING_WIDTH = 480   # Processing resolution width (reduced from 640 for lower CPU)
+PROCESSING_HEIGHT = 288  # Processing resolution height (reduced from 384 for lower CPU)
+DEPTH_THROTTLE_INTERVAL = 6  # Run depth every N frames (increased from 4 for lower CPU)
+JPEG_QUALITY = 70  # JPEG quality for streaming (reduced from 85 for faster encoding)
+TEXT_UPDATE_INTERVAL = 2  # Update text overlay every N frames (reduces text rendering CPU)
 
 # PHASE 2: Depth normalization and meter estimation configuration
 ENABLE_METERS = False  # Set True to enable meter conversion (requires calibration)
@@ -28,14 +30,14 @@ TARGET_CLASSES = []  # Empty = allow all classes; otherwise only these classes t
 SHOW_ALL_DETECTIONS = False  # If True, show all detections in UI (debug mode); else show filtered only
 ACTION_DEBOUNCE_FRAMES = 3  # Action must persist for N frames before changing (reduces flicker)
 
-print("Initializing YOLO-D detector (FPS optimized + PHASE 2)...")
+print("Initializing YOLO-D detector (CPU optimized)...")
 detector = YOLODetector(
     yolo_model_path="yolo11n.pt",
     depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
-    depth_input_size=(384, 384),  # Depth model input size (smaller = faster)
+    depth_input_size=(256, 256),  # Depth model input size (reduced from 384×384 for lower CPU)
     depth_throttle=DEPTH_THROTTLE_INTERVAL,  # Process depth every N frames
     conf_threshold=0.5,
-    processing_resolution=(PROCESSING_WIDTH, PROCESSING_HEIGHT)  # FPS optimization
+    processing_resolution=(PROCESSING_WIDTH, PROCESSING_HEIGHT)  # CPU optimization
 )
 
 # PHASE 2: Configure meter estimation (if enabled)
@@ -102,19 +104,21 @@ bbox_colors = [
 def generate_frames():
     """
     Generate video frames with YOLO-D (depth-aware) detection.
-    FPS OPTIMIZED for Raspberry Pi CPU.
+    CPU OPTIMIZED for Raspberry Pi.
     
     OPTIMIZATIONS APPLIED:
-    1. Frame resizing to processing_resolution (640x384) - done in detector
-    2. Depth throttling (runs every N frames, cached otherwise)
-    3. FPS measurement and overlay
-    4. torch.no_grad() used in all inference operations
+    1. Frame resizing to processing_resolution (480×288) - done in detector
+    2. Depth throttling (runs every 6 frames, cached otherwise)
+    3. Reduced text rendering frequency (every 2 frames)
+    4. Lower JPEG quality (70) for faster encoding
+    5. torch.no_grad() used in all inference operations
     """
     # FPS measurement setup
     fps_buffer = []
     fps_avg_len = 30  # Average over last 30 frames
     last_time = time.time()
     frame_counter = 0
+    text_frame_counter = 0  # CPU OPTIMIZATION: Counter for text rendering throttling
     
     while True:
         # FPS OPTIMIZATION: Measure time delta for FPS calculation
@@ -220,31 +224,36 @@ def generate_frames():
             stats['depth_mode'] = "Meters" if detector.enable_meters else "Relative"
             stats['normalization_method'] = "Percentile (p5..p95)"
 
-        # FPS OPTIMIZATION: Draw FPS overlay on frame
-        cv2.putText(display_frame, f"Objects: {object_count}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 255), 2)
-        cv2.putText(display_frame, f"FPS: {avg_fps:.1f}",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 255), 2)
+        # CPU OPTIMIZATION: Reduce text rendering frequency (major CPU saver)
+        text_frame_counter += 1
+        should_render_text = (text_frame_counter % TEXT_UPDATE_INTERVAL == 0)
         
-        # PHASE 2: Draw depth mode indicator
-        if depth_map is not None:
-            depth_status = "Depth: ON"
-            depth_color = (0, 255, 0)
-        else:
-            depth_status = "Depth: CACHED"
-            depth_color = (255, 255, 0)
-        
-        cv2.putText(display_frame, depth_status,
-                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
-                   0.6, depth_color, 2)
-        
-        # PHASE 2: Display depth mode (Relative vs Calibrated)
-        depth_mode = "Meters" if detector.enable_meters else "Relative"
-        cv2.putText(display_frame, f"Mode: {depth_mode}",
-                   (10, 120), cv2.FONT_HERSHEY_SIMPLEX,
-                   0.5, (255, 255, 255), 1)
+        if should_render_text:
+            # FPS OPTIMIZATION: Draw FPS overlay on frame (every N frames)
+            cv2.putText(display_frame, f"Objects: {object_count}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (0, 255, 255), 2)
+            cv2.putText(display_frame, f"FPS: {avg_fps:.1f}",
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (0, 255, 255), 2)
+            
+            # PHASE 2: Draw depth mode indicator
+            if depth_map is not None:
+                depth_status = "Depth: ON"
+                depth_color = (0, 255, 0)
+            else:
+                depth_status = "Depth: CACHED"
+                depth_color = (255, 255, 0)
+            
+            cv2.putText(display_frame, depth_status,
+                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.6, depth_color, 2)
+            
+            # PHASE 2: Display depth mode (Relative vs Calibrated)
+            depth_mode = "Meters" if detector.enable_meters else "Relative"
+            cv2.putText(display_frame, f"Mode: {depth_mode}",
+                       (10, 120), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.5, (255, 255, 255), 1)
         
         # PHASE 3A: Display action and nearest object
         action_colors = {
@@ -272,8 +281,8 @@ def generate_frames():
                        (w - 300, 90), cv2.FONT_HERSHEY_SIMPLEX,
                        0.5, (0, 255, 255), 2)
 
-        # Encode frame as JPEG with lower quality for better performance
-        ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        # CPU OPTIMIZATION: Encode frame as JPEG with reduced quality for faster encoding
+        ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         frame_bytes = buffer.tobytes()
 
         yield (b'--frame\r\n'
