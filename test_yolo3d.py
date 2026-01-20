@@ -25,9 +25,10 @@ print("Initializing YOLO-3D detector...")
 detector = YOLODetector(
     yolo_model_path="yolo11n.pt",
     depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
-    depth_input_size=(384, 384),
-    depth_throttle=3,
-    conf_threshold=0.5
+    depth_input_size=(384, 256),  # Updated to match app.py (reduced for lower CPU)
+    depth_throttle=6,  # Updated to match app.py (higher = lower CPU)
+    conf_threshold=0.5,
+    processing_resolution=(480, 288)  # Match app.py for consistency
 )
 print("✓ Detector ready")
 
