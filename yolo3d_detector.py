@@ -81,6 +81,22 @@ import torch
 from ultralytics import YOLO
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 import time
+import os
+
+# ONNX Runtime optional import (experimental optimization)
+USE_ONNX_YOLO = False  # Set True to use ONNX Runtime for YOLO inference (experimental)
+ONNX_MODEL_PATH = "yolo11n.onnx"  # Path to ONNX model (must be exported first)
+
+try:
+    if USE_ONNX_YOLO:
+        from onnx.onnx_yolo_detector import OnnxYoloDetector
+        ONNX_AVAILABLE = True
+    else:
+        ONNX_AVAILABLE = False
+except ImportError:
+    ONNX_AVAILABLE = False
+    if USE_ONNX_YOLO:
+        print("⚠ Warning: ONNX Runtime not available. Falling back to PyTorch YOLO.")
 
 
 class YOLODetector:
@@ -113,11 +129,51 @@ class YOLODetector:
         self.processing_resolution = processing_resolution  # (width, height)
         self.frame_count = 0
         
-        # Load YOLO model for 2D detection
-        print("Loading YOLO model...")
-        self.yolo_model = YOLO(yolo_model_path)
-        self.labels = self.yolo_model.names
-        print(f"✓ YOLO loaded: {len(self.labels)} classes")
+        # ONNX Runtime vs PyTorch YOLO (experimental optimization)
+        self.use_onnx = False
+        self.onnx_detector = None
+        self.yolo_model = None
+        
+        # Try to load ONNX Runtime detector if enabled
+        if USE_ONNX_YOLO and ONNX_AVAILABLE:
+            if os.path.exists(ONNX_MODEL_PATH):
+                try:
+                    print(f"📦 Loading ONNX Runtime YOLO detector from {ONNX_MODEL_PATH}...")
+                    self.onnx_detector = OnnxYoloDetector(
+                        ONNX_MODEL_PATH,
+                        conf_threshold=conf_threshold,
+                        input_size=(640, 640)
+                    )
+                    self.labels = self.onnx_detector.labels
+                    self.use_onnx = True
+                    print(f"✓ ONNX Runtime YOLO loaded: {len(self.labels)} classes")
+                except Exception as e:
+                    print(f"⚠ ONNX Runtime YOLO failed to load: {e}")
+                    print("⚠ Falling back to PyTorch YOLO")
+                    self.use_onnx = False
+                    self.onnx_detector = None
+            else:
+                print(f"⚠ ONNX model not found at {ONNX_MODEL_PATH}")
+                print("⚠ Run 'python onnx/export_yolo_to_onnx.py' to export ONNX model")
+                print("⚠ Falling back to PyTorch YOLO")
+                self.use_onnx = False
+        
+        # Load PyTorch YOLO (default or fallback)
+        if not self.use_onnx:
+            print("Loading PyTorch YOLO model...")
+            self.yolo_model = YOLO(yolo_model_path)
+            self.labels = self.yolo_model.names
+            print(f"✓ PyTorch YOLO loaded: {len(self.labels)} classes")
+        
+        # Timing comparison (log every N frames)
+        self.inference_times_pytorch = []
+        self.inference_times_onnx = []
+        self.timing_log_interval = 100  # Log timing comparison every 100 frames
+        
+        # Timing comparison (log every N frames)
+        self.inference_times_pytorch = []
+        self.inference_times_onnx = []
+        self.timing_log_interval = 100  # Log timing comparison every 100 frames
         
         # Load depth estimation model
         print("Loading depth estimation model...")
@@ -440,10 +496,54 @@ class YOLODetector:
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
         
         # Step 1: YOLO 2D detection (runs every frame for smooth tracking)
-        # YOLO is fast enough to run every frame on Pi
-        # NOTE: Ultralytics YOLO automatically uses torch.no_grad() during inference
-        results = self.yolo_model(frame, verbose=False)
-        detections_2d = results[0].boxes
+        # ONNX Runtime or PyTorch YOLO (experimental optimization)
+        # NOTE: PyTorch YOLO automatically uses torch.no_grad() during inference
+        
+        inference_start = time.time()
+        
+        if self.use_onnx:
+            # ONNX Runtime inference
+            try:
+                detections_list = self.onnx_detector.detect(frame)
+                # Convert ONNX detections to PyTorch-like format
+                detections_2d = detections_list  # List of dicts
+                inference_time = (time.time() - inference_start) * 1000  # ms
+                self.inference_times_onnx.append(inference_time)
+            except Exception as e:
+                print(f"⚠ ONNX Runtime inference failed: {e}")
+                print("⚠ Falling back to PyTorch YOLO")
+                # Fallback to PyTorch
+                self.use_onnx = False
+                if self.yolo_model is None:
+                    # Lazy load PyTorch model if not loaded
+                    self.yolo_model = YOLO("yolo11n.pt")
+                    self.labels = self.yolo_model.names
+                results = self.yolo_model(frame, verbose=False)
+                detections_2d = results[0].boxes
+                inference_time = (time.time() - inference_start) * 1000  # ms
+                self.inference_times_pytorch.append(inference_time)
+        else:
+            # PyTorch inference (default)
+            results = self.yolo_model(frame, verbose=False)
+            detections_2d = results[0].boxes
+            inference_time = (time.time() - inference_start) * 1000  # ms
+            self.inference_times_pytorch.append(inference_time)
+        
+        # Log timing comparison periodically
+        if self.frame_count % self.timing_log_interval == 0 and self.frame_count > 0:
+            if self.inference_times_pytorch and self.inference_times_onnx:
+                avg_pytorch = np.mean(self.inference_times_pytorch[-self.timing_log_interval:])
+                avg_onnx = np.mean(self.inference_times_onnx[-self.timing_log_interval:])
+                print(f"⏱️  Inference timing (last {self.timing_log_interval} frames):")
+                print(f"   PyTorch: {avg_pytorch:.2f} ms/frame")
+                print(f"   ONNX Runtime: {avg_onnx:.2f} ms/frame")
+                print(f"   Speedup: {avg_pytorch/avg_onnx:.2f}x")
+            elif self.inference_times_pytorch:
+                avg_pytorch = np.mean(self.inference_times_pytorch[-self.timing_log_interval:])
+                print(f"⏱️  PyTorch YOLO: {avg_pytorch:.2f} ms/frame (last {self.timing_log_interval} frames)")
+            elif self.inference_times_onnx:
+                avg_onnx = np.mean(self.inference_times_onnx[-self.timing_log_interval:])
+                print(f"⏱️  ONNX Runtime YOLO: {avg_onnx:.2f} ms/frame (last {self.timing_log_interval} frames)")
         
         # Step 2: Depth estimation (THROTTLED for performance)
         # OPTIMIZATION 2: Depth runs every N frames, cached depth map reused
@@ -467,15 +567,28 @@ class YOLODetector:
         # Step 3: Fuse 2D detections with depth
         detections = []
         
+        # Handle both PyTorch format (Ultralytics boxes) and ONNX format (dict list)
         for det in detections_2d:
-            conf = det.conf.item()
+            if self.use_onnx and isinstance(det, dict):
+                # ONNX format (already processed dict)
+                x1, y1, x2, y2 = det['bbox']
+                cls_id = det['class_id']
+                label = det['class']
+                conf = det['confidence']
+            else:
+                # PyTorch format (Ultralytics boxes)
+                conf = det.conf.item()
+                if conf < self.conf_threshold:
+                    continue
+                
+                # Extract 2D bounding box (in processing resolution coordinates)
+                x1, y1, x2, y2 = map(int, det.xyxy.cpu().numpy().squeeze())
+                cls_id = int(det.cls.item())
+                label = self.labels[cls_id]
+            
+            # Filter by confidence threshold (ONNX already filtered, but double-check)
             if conf < self.conf_threshold:
                 continue
-            
-            # Extract 2D bounding box (in processing resolution coordinates)
-            x1, y1, x2, y2 = map(int, det.xyxy.cpu().numpy().squeeze())
-            cls_id = int(det.cls.item())
-            label = self.labels[cls_id]
             
             # PHASE 2: Get normalized depth using robust patch sampling
             normalized_depth = None
