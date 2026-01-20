@@ -202,6 +202,9 @@ while True:
     else:
         avg_fps = 0
     
+    # Get frame dimensions for FPS overlay positioning
+    h, w = vis_frame.shape[:2]
+    
     # Draw FPS and object count
     cv2.putText(vis_frame, f"FPS: {avg_fps:.1f}", (10, h - 30),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
