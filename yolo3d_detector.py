@@ -260,6 +260,8 @@ class YOLODetector:
             
             # CPU OPTIMIZATION: Resize for faster processing (depth model input size)
             # Frame is already resized to processing_resolution, so resize to depth_input_size
+            # Reduced resolution acceptable: depth used only for zone classification (Near/Medium/Far),
+            # not for precise distance measurement - slight noise in depth map is acceptable
             # Use INTER_AREA for downscaling (faster)
             h_orig, w_orig = frame.shape[:2]
             frame_resized = cv2.resize(frame_rgb, self.depth_input_size, interpolation=cv2.INTER_AREA)

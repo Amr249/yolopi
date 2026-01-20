@@ -34,7 +34,7 @@ print("Initializing YOLO-D detector (CPU optimized)...")
 detector = YOLODetector(
     yolo_model_path="yolo11n.pt",
     depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
-    depth_input_size=(256, 256),  # Depth model input size (reduced from 384×384 for lower CPU)
+    depth_input_size=(384, 256),  # Depth model input size (reduced for lower CPU; sufficient for zone classification - high spatial precision not required)
     depth_throttle=DEPTH_THROTTLE_INTERVAL,  # Process depth every N frames
     conf_threshold=0.5,
     processing_resolution=(PROCESSING_WIDTH, PROCESSING_HEIGHT)  # CPU optimization
