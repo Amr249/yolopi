@@ -134,6 +134,7 @@ class YOLODetector:
         self.depth_throttle = depth_throttle
         self.processing_resolution = processing_resolution  # (width, height)
         self.frame_count = 0
+        self.enable_depth = enable_depth  # PHASE 1: Flag to disable depth completely
         
         # ONNX Runtime vs PyTorch YOLO (experimental optimization)
         self.use_onnx = False
