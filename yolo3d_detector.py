@@ -107,7 +107,7 @@ class YOLODetector:
     
     def __init__(self, yolo_model_path="yolo11n.pt", 
                  depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
-                 depth_input_size=(384, 384),
+                 depth_input_size=(384, 256),
                  depth_throttle=6,
                  conf_threshold=0.5,
                  processing_resolution=(640, 384)):
@@ -117,7 +117,10 @@ class YOLODetector:
         Args:
             yolo_model_path: Path to YOLO model (.pt file)
             depth_model_name: HuggingFace model name for depth estimation
-            depth_input_size: Input size for depth model (smaller = faster)
+            depth_input_size: Input size for depth model (width, height) - reduced for lower CPU
+                           - Lower resolution = faster inference, acceptable for zone classification
+                           - High spatial precision not required (Near/Medium/Far zones only)
+                           - Depth map is resized back to processing resolution for compatibility
             depth_throttle: Process depth every N frames (default 6)
                            - Higher interval = lower CPU usage, slightly slower depth refresh
                            - Cached depth map is reused on skipped frames for smooth tracking
