@@ -1,53 +1,53 @@
+"""
+PHASE 1: YOLO-only baseline for stable real-time perception on Raspberry Pi
+Clean, fast, and stable YOLO object detection pipeline running on CPU only.
+No depth estimation, no ONNX, no ROS, no experimental features.
+"""
 from flask import Flask, Response, jsonify
 import cv2
 import numpy as np
 import time
 import threading
-from yolo3d_detector import YOLODetector, draw_detection_with_depth
+from yolo3d_detector import YOLODetector
 
 app = Flask(__name__)
 
 # ==============================
-# INITIALIZE YOLO-D DETECTOR (FPS OPTIMIZED + PHASE 2)
+# PHASE 1: YOLO-ONLY CONFIGURATION
 # ==============================
-# FPS OPTIMIZATION CONSTANTS (PHASE 1) - CPU OPTIMIZED
-PROCESSING_WIDTH = 480   # Processing resolution width (reduced from 640 for lower CPU)
-PROCESSING_HEIGHT = 288  # Processing resolution height (reduced from 384 for lower CPU)
-DEPTH_THROTTLE_INTERVAL = 6  # Run depth every N frames (higher = lower CPU, slightly slower depth refresh; cached depth reused on skipped frames)
-JPEG_QUALITY = 70  # JPEG quality for streaming (reduced from 85 for faster encoding)
-TEXT_UPDATE_INTERVAL = 2  # Update text overlay every N frames (reduces text rendering CPU)
+# PHASE 1: Stable YOLO-only perception on Raspberry Pi
+ENABLE_DEPTH = False  # PHASE 1: Disable depth completely
+ENABLE_ONNX = False  # PHASE 1: Disable ONNX completely
 
-# PHASE 2: Depth normalization and meter estimation configuration
-ENABLE_METERS = False  # Set True to enable meter conversion (requires calibration)
-CALIBRATION_NEAR_M = 0.5  # Reference distance 1 (meters)
-CALIBRATION_FAR_M = 2.0    # Reference distance 2 (meters)
-# Calibration values will be set during calibration (if enabled)
+# PHASE 1: Core configuration constants
+PROCESSING_WIDTH = 640   # Processing resolution width
+PROCESSING_HEIGHT = 384  # Processing resolution height
+FRAME_SKIP = 1  # Process every Nth frame (1 = every frame, 2 = every other frame, etc.)
+SHOW_FPS = True  # Display FPS overlay on output frame
+CONF_THRESHOLD = 0.5  # Confidence threshold for detections
+JPEG_QUALITY = 85  # JPEG quality for streaming
 
-# PHASE 3A: Distance-based filtering and robotics actions
-ENABLE_DISTANCE_FILTERING = True  # Enable zone-based filtering
-ALLOW_ZONES = ["Near", "Medium"]  # Zones to include in filtered detections (exclude "Far")
-TARGET_CLASSES = []  # Empty = allow all classes; otherwise only these classes trigger actions
-SHOW_ALL_DETECTIONS = False  # If True, show all detections in UI (debug mode); else show filtered only
-ACTION_DEBOUNCE_FRAMES = 3  # Action must persist for N frames before changing (reduces flicker)
+print("=" * 60)
+print("PHASE 1: YOLO-only baseline for stable real-time perception")
+print("=" * 60)
+print(f"✓ Depth estimation: DISABLED")
+print(f"✓ ONNX Runtime: DISABLED")
+print(f"✓ Processing resolution: {PROCESSING_WIDTH}x{PROCESSING_HEIGHT}")
+print(f"✓ Frame skip: {FRAME_SKIP}")
+print("=" * 60)
 
-print("Initializing YOLO-D detector (CPU optimized)...")
+# Initialize YOLO detector (depth disabled in PHASE 1)
+print("\nInitializing YOLO detector...")
 detector = YOLODetector(
     yolo_model_path="yolo11n.pt",
-    depth_model_name="depth-anything/Depth-Anything-V2-Small-hf",
-    depth_input_size=(384, 256),  # Depth model input size (reduced for lower CPU; sufficient for zone classification - high spatial precision not required)
-    depth_throttle=DEPTH_THROTTLE_INTERVAL,  # Process depth every N frames
-    conf_threshold=0.5,
-    processing_resolution=(PROCESSING_WIDTH, PROCESSING_HEIGHT)  # CPU optimization
+    depth_model_name=None,  # PHASE 1: No depth model
+    depth_input_size=(256, 256),  # Not used in PHASE 1
+    depth_throttle=1,  # Not used in PHASE 1
+    conf_threshold=CONF_THRESHOLD,
+    processing_resolution=(PROCESSING_WIDTH, PROCESSING_HEIGHT),
+    enable_depth=False  # PHASE 1: Explicitly disable depth
 )
-
-# PHASE 2: Configure meter estimation (if enabled)
-if ENABLE_METERS:
-    detector.enable_meters = True
-    detector.calibration_near_m = CALIBRATION_NEAR_M
-    detector.calibration_far_m = CALIBRATION_FAR_M
-    print(f"✓ Meter estimation enabled (calibration: {CALIBRATION_NEAR_M}m - {CALIBRATION_FAR_M}m)")
-else:
-    print("✓ Relative depth mode (normalized [0,1])")
+print("✓ YOLO detector ready\n")
 
 print("✓ YOLO-D detector ready (FPS optimized + PHASE 2)")
 
@@ -58,41 +58,13 @@ cap = cv2.VideoCapture(0)
 cap.set(3, 640)
 cap.set(4, 480)
 
-# Global stats
+# PHASE 1: Global stats (simplified - no depth, zones, or actions)
 stats = {
     'object_count': 0,
     'fps': 0,
-    'detections': [],
-    'filtered_count': 0,
-    'nearest_object': None,
-    'action': 'PROCEED',
-    'action_reason': 'Initializing...',
-    'depth_mode': 'Relative',
-    'normalization_method': 'Percentile (p5..p95)'
+    'detections': []
 }
 stats_lock = threading.Lock()
-
-# PHASE 3A: Action state for debouncing
-action_history = []  # Store last N actions for debouncing
-action_history_max = ACTION_DEBOUNCE_FRAMES
-
-# Global stats
-stats = {
-    'object_count': 0,
-    'fps': 0,
-    'detections': [],
-    'filtered_count': 0,
-    'nearest_object': None,
-    'action': 'PROCEED',
-    'action_reason': 'Initializing...',
-    'depth_mode': 'Relative',
-    'normalization_method': 'Percentile (p5..p95)'
-}
-stats_lock = threading.Lock()
-
-# PHASE 3A: Action state for debouncing
-action_history = []  # Store last N actions for debouncing
-action_history_max = ACTION_DEBOUNCE_FRAMES
 
 # Bounding box colors
 bbox_colors = [
@@ -103,103 +75,75 @@ bbox_colors = [
 
 def generate_frames():
     """
-    Generate video frames with YOLO-D (depth-aware) detection.
-    CPU OPTIMIZED for Raspberry Pi.
+    PHASE 1: Generate video frames with YOLO-only detection.
+    Clean, fast, and stable real-time perception on Raspberry Pi.
     
     OPTIMIZATIONS APPLIED:
-    1. Frame resizing to processing_resolution (480×288) - done in detector
-    2. Depth throttling (runs every 6 frames, cached otherwise)
-    3. Reduced text rendering frequency (every 2 frames)
-    4. Lower JPEG quality (70) for faster encoding
-    5. torch.no_grad() used in all inference operations
+    1. Frame resizing to processing_resolution (640×384) - done once after capture
+    2. torch.no_grad() used for YOLO inference
+    3. Optional frame skipping (process every Nth frame)
+    4. FPS measurement with rolling average
     """
     # FPS measurement setup
     fps_buffer = []
     fps_avg_len = 30  # Average over last 30 frames
-    last_time = time.time()
     frame_counter = 0
-    text_frame_counter = 0  # CPU OPTIMIZATION: Counter for text rendering throttling
     
     while True:
-        # FPS OPTIMIZATION: Measure time delta for FPS calculation
-        current_time = time.time()
-        frame_start_time = current_time
+        # Measure frame processing time for FPS calculation
+        frame_start_time = time.time()
         
+        # Read frame from camera
         success, frame = cap.read()
         if not success:
             break
+        
+        # PHASE 1: Optional frame skipping (process every Nth frame)
+        frame_counter += 1
+        if FRAME_SKIP > 1 and (frame_counter % FRAME_SKIP != 0):
+            # Skip this frame - use last frame or show empty
+            continue
 
-        # OPTIMIZATION: Detector handles frame resizing internally
-        # Depth throttling is controlled by detector's frame counter
-        detections, depth_map, display_frame = detector.detect(frame, update_depth=None)
-
-        # PHASE 3A: Filter detections and compute actions
-        filtered_detections = detections
-        if ENABLE_DISTANCE_FILTERING:
-            # Filter by zone
-            filtered_detections = detector.filter_detections_by_zone(detections, ALLOW_ZONES)
-            # Filter by class (if TARGET_CLASSES specified)
-            if TARGET_CLASSES:
-                filtered_detections = detector.filter_detections_by_class(filtered_detections, TARGET_CLASSES)
+        # PHASE 1: Resize frame ONCE after capture for processing
+        original_frame = frame.copy()
+        h_orig, w_orig = frame.shape[:2]
+        if (w_orig, h_orig) != (PROCESSING_WIDTH, PROCESSING_HEIGHT):
+            frame = cv2.resize(frame, (PROCESSING_WIDTH, PROCESSING_HEIGHT), interpolation=cv2.INTER_AREA)
         
-        # Find nearest object
-        nearest_object = detector.find_nearest_object(filtered_detections)
+        # PHASE 1: YOLO inference only (no depth)
+        detections, depth_map, display_frame = detector.detect(frame, update_depth=False)
         
-        # Compute action (pass frame width for avoid direction calculation)
-        h, w = display_frame.shape[:2]
-        action, action_reason = detector.compute_action(filtered_detections, nearest_object, frame_width=w)
-        
-        # PHASE 3A: Action debouncing (prevent flicker)
-        action_history.append(action)
-        if len(action_history) > action_history_max:
-            action_history.pop(0)
-        
-        # Use most common action in history (debounced)
-        if len(action_history) >= action_history_max:
-            from collections import Counter
-            action_counts = Counter(action_history)
-            debounced_action = action_counts.most_common(1)[0][0]
-            # Only update reason if action changed
-            if debounced_action != action:
-                # Recompute reason for debounced action
-                h, w = display_frame.shape[:2]
-                action, action_reason = detector.compute_action(filtered_detections, nearest_object, frame_width=w)
-            action = debounced_action
-
-        # Determine which detections to display
-        display_detections = filtered_detections if not SHOW_ALL_DETECTIONS else detections
-        
-        object_count = len(display_detections)
-        filtered_count = len(filtered_detections)
+        # PHASE 1: Simple detection processing (no filtering, no zones, no actions)
+        object_count = len(detections)
         current_detections = []
-
-        # Draw detections with depth information
-        for detection in display_detections:
+        
+        # PHASE 1: Draw simple bounding boxes and labels
+        for detection in detections:
             cls_id = detection['class_id']
+            bbox = detection['bbox']
+            label = detection['class']
+            conf = detection['confidence']
             color = bbox_colors[cls_id % len(bbox_colors)]
             
-            # Draw detection with depth overlay
-            draw_detection_with_depth(display_frame, detection, color)
+            # Draw bounding box
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
             
-            object_count += 1
+            # Draw label with confidence
+            label_text = f"{label} {int(conf * 100)}%"
+            (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(display_frame, (x1, y1 - text_h - 5), (x1 + text_w + 5, y1), color, -1)
+            cv2.putText(display_frame, label_text, (x1 + 2, y1 - 2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            # PHASE 2: Include zone and distance information in stats
+            # Store detection info for stats
             det_info = {
-                'label': detection['class'],
-                'confidence': int(detection['confidence'] * 100),
-                'zone': detection.get('zone', 'Unknown'),
-                'normalized_depth': round(detection.get('normalized_depth', 0), 2) if detection.get('normalized_depth') is not None else None
+                'label': label,
+                'confidence': int(conf * 100)
             }
-            
-            # Add distance in meters if available
-            if detection.get('distance_m') is not None:
-                det_info['distance_m'] = round(detection['distance_m'], 2)
-            elif detection.get('depth') is not None:  # Backward compatibility
-                det_info['depth'] = round(detection['depth'], 2)
-            
             current_detections.append(det_info)
 
-        # FPS OPTIMIZATION: Calculate FPS using time delta
+        # PHASE 1: Calculate FPS using time delta
         frame_end_time = time.time()
         frame_dt = frame_end_time - frame_start_time
         
@@ -212,84 +156,28 @@ def generate_frames():
         else:
             avg_fps = 0
         
-        # PHASE 3A: Update global stats with action and nearest object info
+        # PHASE 1: Update global stats (simplified)
         with stats_lock:
             stats['object_count'] = object_count
             stats['fps'] = avg_fps
             stats['detections'] = current_detections
-            stats['filtered_count'] = filtered_count
-            stats['nearest_object'] = nearest_object
-            stats['action'] = action
-            stats['action_reason'] = action_reason
-            stats['depth_mode'] = "Meters" if detector.enable_meters else "Relative"
-            stats['normalization_method'] = "Percentile (p5..p95)"
-
-        # CPU OPTIMIZATION: Reduce text rendering frequency (major CPU saver)
-        text_frame_counter += 1
-        should_render_text = (text_frame_counter % TEXT_UPDATE_INTERVAL == 0)
         
-        if should_render_text:
-            # FPS OPTIMIZATION: Draw FPS overlay on frame (every N frames)
-            cv2.putText(display_frame, f"Objects: {object_count}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 255, 255), 2)
+        # PHASE 1: Draw FPS and object count overlay (if enabled)
+        if SHOW_FPS:
+            h, w = display_frame.shape[:2]
             cv2.putText(display_frame, f"FPS: {avg_fps:.1f}",
-                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 255, 255), 2)
-            
-            # PHASE 2: Draw depth mode indicator
-            if depth_map is not None:
-                depth_status = "Depth: ON"
-                depth_color = (0, 255, 0)
-            else:
-                depth_status = "Depth: CACHED"
-                depth_color = (255, 255, 0)
-            
-            cv2.putText(display_frame, depth_status,
-                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.6, depth_color, 2)
-            
-            # PHASE 2: Display depth mode (Relative vs Calibrated)
-            depth_mode = "Meters" if detector.enable_meters else "Relative"
-            cv2.putText(display_frame, f"Mode: {depth_mode}",
-                       (10, 120), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.5, (255, 255, 255), 1)
+                       (10, h - 30), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.6, (0, 255, 255), 2)
+            cv2.putText(display_frame, f"Objects: {object_count}",
+                       (10, h - 60), cv2.FONT_HERSHEY_SIMPLEX,
+                       0.6, (0, 255, 255), 2)
         
-        # PHASE 3A: Display action and nearest object
-        action_colors = {
-            'STOP': (0, 0, 255),           # Red
-            'SLOW_DOWN': (0, 165, 255),    # Orange
-            'PROCEED': (0, 255, 0),        # Green
-            'AVOID_LEFT': (255, 0, 255),   # Magenta
-            'AVOID_RIGHT': (255, 0, 255)   # Magenta
-        }
-        action_color = action_colors.get(action, (255, 255, 255))
-        
-        # Draw action prominently
-        h, w = display_frame.shape[:2]
-        cv2.putText(display_frame, f"ACTION: {action}",
-                   (w - 300, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                   0.8, action_color, 3)
-        cv2.putText(display_frame, action_reason,
-                   (w - 300, 60), cv2.FONT_HERSHEY_SIMPLEX,
-                   0.5, (255, 255, 255), 2)
-        
-        # Draw nearest object info
-        if nearest_object:
-            dist_text = f"{nearest_object['distance']:.2f}m" if nearest_object.get('distance_m') else f"Rel:{nearest_object.get('normalized_depth', 0):.2f}"
-            cv2.putText(display_frame, f"NEAREST: {nearest_object['class']} {dist_text} ({nearest_object['zone']})",
-                       (w - 300, 90), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.5, (0, 255, 255), 2)
-
-        # CPU OPTIMIZATION: Encode frame as JPEG with reduced quality for faster encoding
+        # PHASE 1: Encode frame as JPEG for streaming
         ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         frame_bytes = buffer.tobytes()
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        
-        frame_counter += 1
-        last_time = current_time
 
 @app.route('/')
 def index():

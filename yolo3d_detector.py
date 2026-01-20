@@ -110,7 +110,8 @@ class YOLODetector:
                  depth_input_size=(384, 256),
                  depth_throttle=6,
                  conf_threshold=0.5,
-                 processing_resolution=(640, 384)):
+                 processing_resolution=(640, 384),
+                 enable_depth=True):
         """
         Initialize YOLO-D detector with FPS optimizations for Raspberry Pi.
         
@@ -180,30 +181,38 @@ class YOLODetector:
         self.inference_times_onnx = []
         self.timing_log_interval = 100  # Log timing comparison every 100 frames
         
-        # Load depth estimation model
-        print("Loading depth estimation model...")
-        try:
-            self.depth_processor = AutoImageProcessor.from_pretrained(depth_model_name)
-            self.depth_model = AutoModelForDepthEstimation.from_pretrained(depth_model_name)
-            self.depth_model.eval()  # Set to evaluation mode
-            
-            # Ensure CPU-only (no CUDA)
-            if torch.cuda.is_available():
-                print("⚠ CUDA available but using CPU for Pi compatibility")
-            self.depth_model = self.depth_model.cpu()
-            
-            # Disable gradient computation for inference
-            for param in self.depth_model.parameters():
-                param.requires_grad = False
-            
-            self.depth_available = True
-            print("✓ Depth model loaded successfully")
-        except Exception as e:
-            print(f"⚠ Depth model failed to load: {e}")
-            print("⚠ Falling back to geometry-based depth estimation")
+        # PHASE 1: Load depth estimation model only if enabled
+        if self.enable_depth and depth_model_name is not None:
+            print("Loading depth estimation model...")
+            try:
+                self.depth_processor = AutoImageProcessor.from_pretrained(depth_model_name)
+                self.depth_model = AutoModelForDepthEstimation.from_pretrained(depth_model_name)
+                self.depth_model.eval()  # Set to evaluation mode
+                
+                # Ensure CPU-only (no CUDA)
+                if torch.cuda.is_available():
+                    print("⚠ CUDA available but using CPU for Pi compatibility")
+                self.depth_model = self.depth_model.cpu()
+                
+                # Disable gradient computation for inference
+                for param in self.depth_model.parameters():
+                    param.requires_grad = False
+                
+                self.depth_available = True
+                print("✓ Depth model loaded successfully")
+            except Exception as e:
+                print(f"⚠ Depth model failed to load: {e}")
+                print("⚠ Falling back to geometry-based depth estimation")
+                self.depth_available = False
+                self.depth_model = None
+                self.depth_processor = None
+        else:
+            # PHASE 1: Depth disabled
             self.depth_available = False
             self.depth_model = None
             self.depth_processor = None
+            if not self.enable_depth:
+                print("✓ Depth estimation: DISABLED (PHASE 1 mode)")
         
         # Camera intrinsics (default values - should be calibrated)
         # For 640x480 camera with ~60 degree FOV
@@ -530,8 +539,9 @@ class YOLODetector:
                 inference_time = (time.time() - inference_start) * 1000  # ms
                 self.inference_times_pytorch.append(inference_time)
         else:
-            # PyTorch inference (default)
-            results = self.yolo_model(frame, verbose=False)
+            # PyTorch inference (default) - PHASE 1: Use torch.no_grad() explicitly
+            with torch.no_grad():
+                results = self.yolo_model(frame, verbose=False)
             detections_2d = results[0].boxes
             inference_time = (time.time() - inference_start) * 1000  # ms
             self.inference_times_pytorch.append(inference_time)
@@ -552,24 +562,27 @@ class YOLODetector:
                 avg_onnx = np.mean(self.inference_times_onnx[-self.timing_log_interval:])
                 print(f"⏱️  ONNX Runtime YOLO: {avg_onnx:.2f} ms/frame (last {self.timing_log_interval} frames)")
         
-        # Step 2: Depth estimation (THROTTLED for performance)
-        # OPTIMIZATION 2: Depth runs every N frames, cached depth map reused
+        # Step 2: Depth estimation (PHASE 1: DISABLED)
+        # PHASE 1: Skip depth estimation completely
         depth_map = None
-        if update_depth is None:
-            # Use throttling: run depth every depth_throttle frames
-            should_update_depth = (self.frame_count % self.depth_throttle == 0)
-        else:
-            # Override throttling if explicitly requested
-            should_update_depth = update_depth
-        
-        if should_update_depth and self.depth_available:
-            # Run depth estimation (expensive operation)
-            depth_map = self.estimate_depth_map(frame)
-            self.cached_depth_map = depth_map
-            self.cached_depth_frame = frame.copy()
-        elif self.cached_depth_map is not None:
-            # OPTIMIZATION: Reuse cached depth map (no computation)
-            depth_map = self.cached_depth_map
+        if self.enable_depth:
+            # Depth estimation (THROTTLED for performance)
+            # OPTIMIZATION 2: Depth runs every N frames, cached depth map reused
+            if update_depth is None:
+                # Use throttling: run depth every depth_throttle frames
+                should_update_depth = (self.frame_count % self.depth_throttle == 0)
+            else:
+                # Override throttling if explicitly requested
+                should_update_depth = update_depth
+            
+            if should_update_depth and self.depth_available:
+                # Run depth estimation (expensive operation)
+                depth_map = self.estimate_depth_map(frame)
+                self.cached_depth_map = depth_map
+                self.cached_depth_frame = frame.copy()
+            elif self.cached_depth_map is not None:
+                # OPTIMIZATION: Reuse cached depth map (no computation)
+                depth_map = self.cached_depth_map
         
         # Step 3: Fuse 2D detections with depth
         detections = []
@@ -597,29 +610,30 @@ class YOLODetector:
             if conf < self.conf_threshold:
                 continue
             
-            # PHASE 2: Get normalized depth using robust patch sampling
+            # PHASE 2: Get normalized depth using robust patch sampling (PHASE 1: DISABLED)
             normalized_depth = None
             distance_m = None
-            zone = "Unknown"
+            zone = None  # PHASE 1: No zones
             
-            if depth_map is not None:
-                # Get normalized depth [0, 1] where 0=near, 1=far
-                normalized_depth = self.get_depth_at_bbox_center(depth_map, (x1, y1, x2, y2))
-                
-                if normalized_depth is not None:
-                    # Classify into zone
-                    zone = self.classify_distance_zone(normalized_depth)
+            if self.enable_depth:
+                if depth_map is not None:
+                    # Get normalized depth [0, 1] where 0=near, 1=far
+                    normalized_depth = self.get_depth_at_bbox_center(depth_map, (x1, y1, x2, y2))
                     
-                    # Optional: Convert to meters if calibrated
-                    distance_m = self.convert_to_meters(normalized_depth)
-            else:
-                # Fallback to geometry-based estimation (returns approximate meters)
-                distance_m = self.estimate_depth_geometry((x1, y1, x2, y2), label)
-                if distance_m is not None:
-                    # Convert to normalized depth for consistency (rough approximation)
-                    # Assume geometry-based depth is in reasonable range
-                    normalized_depth = min(1.0, max(0.0, (distance_m - 0.5) / 5.0))
-                    zone = self.classify_distance_zone(normalized_depth)
+                    if normalized_depth is not None:
+                        # Classify into zone
+                        zone = self.classify_distance_zone(normalized_depth)
+                        
+                        # Optional: Convert to meters if calibrated
+                        distance_m = self.convert_to_meters(normalized_depth)
+                else:
+                    # Fallback to geometry-based estimation (returns approximate meters)
+                    distance_m = self.estimate_depth_geometry((x1, y1, x2, y2), label)
+                    if distance_m is not None:
+                        # Convert to normalized depth for consistency (rough approximation)
+                        # Assume geometry-based depth is in reasonable range
+                        normalized_depth = min(1.0, max(0.0, (distance_m - 0.5) / 5.0))
+                        zone = self.classify_distance_zone(normalized_depth)
             
             # Scale bbox coordinates back to original frame size if needed
             if (w_orig, h_orig) != (target_w, target_h):
