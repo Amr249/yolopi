@@ -13,7 +13,7 @@ app = Flask(__name__)
 # FPS OPTIMIZATION CONSTANTS (PHASE 1) - CPU OPTIMIZED
 PROCESSING_WIDTH = 480   # Processing resolution width (reduced from 640 for lower CPU)
 PROCESSING_HEIGHT = 288  # Processing resolution height (reduced from 384 for lower CPU)
-DEPTH_THROTTLE_INTERVAL = 6  # Run depth every N frames (increased from 4 for lower CPU)
+DEPTH_THROTTLE_INTERVAL = 6  # Run depth every N frames (higher = lower CPU, slightly slower depth refresh; cached depth reused on skipped frames)
 JPEG_QUALITY = 70  # JPEG quality for streaming (reduced from 85 for faster encoding)
 TEXT_UPDATE_INTERVAL = 2  # Update text overlay every N frames (reduces text rendering CPU)
 
